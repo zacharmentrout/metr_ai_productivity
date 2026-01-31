@@ -1,0 +1,23 @@
+# R
+.Rhistory
+.Rdata
+.RData
+.Rproj.user/
+*.Rproj
+
+# Stan
+*.rds
+
+# Quarto
+/.quarto/
+*_files/
+*_cache/
+*.html
+*.pdf
+
+# macOS
+.DS_Store
+
+# Editor
+*.swp
+*~

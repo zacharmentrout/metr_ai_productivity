@@ -1,0 +1,24 @@
+---
+title: "Bayesian Reanalysis of METR AI Developer Productivity Study"
+format:
+  html:
+    embed-resources: true
+---
+
+```{r}
+#| label: setup
+#| message: false
+
+source("mcmc_visualization_tools/r/mcmc_visualization_tools.R")
+source("mcmc_visualization_tools/r/mcmc_analysis_tools_rstan.R")
+
+library(rstan)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+```
+
+```{r}
+#| label: load-data
+
+data <- read.csv("data/data_complete.csv")
+```
