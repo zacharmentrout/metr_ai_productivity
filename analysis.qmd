@@ -9,8 +9,10 @@ format:
 #| label: setup
 #| message: false
 
-source("mcmc_visualization_tools/r/mcmc_visualization_tools.R")
-source("mcmc_visualization_tools/r/mcmc_analysis_tools_rstan.R")
+# Set up util environment with analysis and visualization tools
+util <- new.env()
+source("mcmc_visualization_tools/r/mcmc_analysis_tools_rstan.R", local = util)
+source("mcmc_visualization_tools/r/mcmc_visualization_tools.R", local = util)
 
 library(rstan)
 rstan_options(auto_write = TRUE)

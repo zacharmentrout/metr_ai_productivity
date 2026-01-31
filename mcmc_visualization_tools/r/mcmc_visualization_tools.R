@@ -26,17 +26,7 @@ c_light_teal <- c("#6B8E8E")
 c_mid_teal <- c("#487575")
 c_dark_teal <- c("#1D4F4F")
 
-util <- new.env()
-if (file.exists('mcmc_analysis_tools_rstan.R')) {
-  source('mcmc_analysis_tools_rstan.R', local=util)
-} else if (file.exists('mcmc_analysis_tools_other.R')) {
-  source('mcmc_analysis_tools_other.R', local=util)
-} else {
-  stop(print0('mcmc_visualization_tools.R requires that ',
-              'mcmc_analysis_tools_[rstan/other].R from ',
-              'https://github.com/betanalpha/mcmc_diagnostics ',
-              'is available.'))
-}
+# Analysis tools are expected to be sourced into the same environment
 
 ################################################################################
 # Utility Functions
@@ -451,14 +441,14 @@ plot_hist_quantiles <- function(samples, val_name_prefix,
   }
 
   bin_count_samples <-
-    util$eval_expectand_pushforwards(samples,
+    eval_expectand_pushforwards(samples,
                                      bin_counters,
                                      list('x'=array(names)))
 
   probs <- c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
   quantiles <- sapply(bin_count_samples,
                       function(s)
-                      util$ensemble_mcmc_quantile_est(s, probs))
+                      ensemble_mcmc_quantile_est(s, probs))
 
   plot_quantiles <- do.call(cbind, lapply(plot_idxs,
                                           function(n) quantiles[1:9, n]))
@@ -559,14 +549,14 @@ plot_disc_pushforward_quantiles <- function(samples, names,
 
   if(!is.null(baseline_values) & residual) {
     calc <- function(n) {
-      util$ensemble_mcmc_quantile_est(samples[[names[n]]] -
+      ensemble_mcmc_quantile_est(samples[[names[n]]] -
                                       baseline_values[n],
                                       probs)
     }
     quantiles <- sapply(1:N, calc)
   } else {
     calc <- function(n) {
-      util$ensemble_mcmc_quantile_est(samples[[names[n]]], probs)
+      ensemble_mcmc_quantile_est(samples[[names[n]]], probs)
     }
     quantiles <- sapply(1:N, calc)
   }
@@ -706,14 +696,14 @@ plot_conn_pushforward_quantiles <- function(samples, names, plot_xs,
 
   if(!is.null(baseline_values) & residual) {
     calc <- function(n) {
-      util$ensemble_mcmc_quantile_est(samples[[names[n]]] -
+      ensemble_mcmc_quantile_est(samples[[names[n]]] -
                                       baseline_values[n],
                                       probs)
     }
     plot_quantiles <- sapply(1:N, calc)
   } else {
     calc <- function(n) {
-      util$ensemble_mcmc_quantile_est(samples[[names[n]]], probs)
+      ensemble_mcmc_quantile_est(samples[[names[n]]], probs)
     }
     plot_quantiles <- sapply(1:N, calc)
   }
@@ -996,14 +986,14 @@ plot_conditional_mean_quantiles <- function(samples, names, obs_xs,
   }
 
   cond_mean_samples <-
-    util$eval_expectand_pushforwards(samples,
+    eval_expectand_pushforwards(samples,
                                      expectands,
                                      list('y'=array(names)))
 
   probs <- c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
   mean_quantiles <- sapply(cond_mean_samples,
                            function(s)
-                           util$ensemble_mcmc_quantile_est(s, probs))
+                           ensemble_mcmc_quantile_est(s, probs))
 
   plot_quantiles <- do.call(cbind, lapply(plot_idxs,
                                           function(n) mean_quantiles[1:9, n]))
@@ -1197,14 +1187,14 @@ plot_conditional_median_quantiles <- function(samples, names, obs_xs,
   }
 
   cond_median_samples <-
-    util$eval_expectand_pushforwards(samples,
+    eval_expectand_pushforwards(samples,
                                      expectands,
                                      list('y'=array(names)))
 
   probs <- c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
   median_quantiles <- sapply(cond_median_samples,
                              function(s)
-                             util$ensemble_mcmc_quantile_est(s, probs))
+                             ensemble_mcmc_quantile_est(s, probs))
 
   plot_quantiles <- do.call(cbind, lapply(plot_idxs,
                                           function(n) median_quantiles[1:9, n]))
