@@ -10,9 +10,24 @@ The original paper can be found in `resources/reference_paper/metr_ai_productivi
 
 ## Statistical Philosophy and Workflow
 
-Before building any models, consult the materials in `resources/betancourt/`. This directory contains critical reference documents from statistician Michael Betancourt covering statistical philosophy, principled model building workflow, modeling techniques, and case studies. These should serve as both inspiration and philosophical guidance throughout the project.
+See `BETANCOURT_REFERENCE.md` for consolidated notes on Betancourt's workflow, prior calibration methods, and code patterns. The original PDFs are in `resources/betancourt/`.
 
 When writing code, structure it as similarly to Betancourt's as possible. Rely heavily on the functions in the directory `mcmc_visualization_tools`. Use base R and Stan throughout — no ggplot2, no tidyverse.
+
+**Do not standardize or center input data.** Keep predictors on their natural scales. This makes priors interpretable and coefficients meaningful without back-transformation.
+
+### Prior Calibration Quick Reference
+
+When specifying priors, reason about extremity thresholds (values beyond which the parameter becomes implausible), then derive the prior SD:
+
+| Parameter Type | Distribution | SD Formula (for 1% tail) |
+|----------------|--------------|--------------------------|
+| Unconstrained (α, β) | Normal(0, SD) | SD = threshold / 2.32 |
+| Positive (σ, τ) | Half-Normal(0, SD) | SD = threshold / 2.57 |
+
+Example: If β > 3 is implausible, use Normal(0, 3/2.32) = Normal(0, 1.29).
+
+As we build out the `analysis.qmd` file, ensure that it is structured such that we can step through several iterations of model development. We want to narrate what we're doing as we're doing it.
 
 ## Critical Note: Iterative Model Building
 
@@ -51,6 +66,24 @@ We take a different approach: model the data-generating process explicitly. This
 **Log Completion Time (observed, continuous)**: The outcome. Caused by ability, task variation, and treatment. More able developers are faster. Harder tasks take longer. Treatment (AI allowed) has some effect — the sign and magnitude are what we're trying to learn.
 
 **Treatment (observed, binary)**: Randomized at the issue level. Only affects completion time. Does not affect forecasts, task exposure, or resource needs (these are either pre-randomization or about the developer, not the task outcome).
+
+
+## Steps in the Analysis
+Important: Each step will be collaborative! We plan what we're doing before we modify files.
+
+1. Introduction / Background
+2. Exploratory analysis / defining summary statistics for prior predictive and posterior predictive checks (collaborative!)
+3. Follow Betancourt's iterative model building workflow (`resources/betancourt/modeling_foundation/bayesian_workflow.pdf`):
+  1. Conceptual analysis - Define the domain, relevant quantities, and the questions you want to answer
+  2. Observational model development - Build the generative model that describes how data arise
+  3. Prior model development - Choose priors based on domain expertise and the scales of the problem
+  4. Prior predictive check - Simulate from the prior predictive distribution; verify the model produces plausible data before seeing any real data
+  5. Fit the model - Run HMC/MCMC on observed data
+  6. Computational diagnostics - Check Rhat, ESS, divergences, energy diagnostics. If these fail, stop and fix before proceeding.
+  7. Posterior retrodictive check - Compare model predictions to observed data using summary statistics; identify systematic misfits
+  8. Model critique and iteration - If retrodictive checks reveal problems, return to step 2 or 3 and refine
+
+Narrate the steps as you go and structure it in a readable way.
 
 ## Key Questions to Answer
 

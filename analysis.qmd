@@ -9,7 +9,6 @@ format:
 #| label: setup
 #| message: false
 
-# Set up util environment with analysis and visualization tools
 util <- new.env()
 source("mcmc_visualization_tools/r/mcmc_analysis_tools_rstan.R", local = util)
 source("mcmc_visualization_tools/r/mcmc_visualization_tools.R", local = util)
@@ -17,10 +16,369 @@ source("mcmc_visualization_tools/r/mcmc_visualization_tools.R", local = util)
 library(rstan)
 rstan_options(auto_write = TRUE)
 options(mc.cores = parallel::detectCores())
+
 ```
+
+# Exploratory Data Analysis
 
 ```{r}
 #| label: load-data
 
-data <- read.csv("data/data_complete.csv")
+dat <- read.csv("data/data_complete.csv")
+
+# Compute total implementation time (minutes)
+dat$total_time <- dat$initial_implementation_time + dat$post_review_implementation_time
+
+# Forecast time (minutes)
+dat$forecast <- dat$predicted_time_no_ai
+
+# Recode treatment: 1 = AI access, 0 = AI restricted
+dat$ai_access <- 1 - dat$ai_treatment
+```
+
+```{r}
+#| label: fig-completion-times
+#| fig-cap: "Distribution of observed completion times (minutes)"
+
+util$plot_line_hist(dat$total_time[!is.na(dat$total_time)],
+                    0, 1500, 50,
+                    xlab = "Completion time (minutes)")
+```
+
+```{r}
+#| label: fig-forecast-times
+#| fig-cap: "Distribution of forecast times (minutes)"
+
+util$plot_line_hist(dat$forecast,
+                    0, 800, 25,
+                    xlab = "Forecast time (minutes)")
+```
+
+```{r}
+#| label: data-summary
+
+cat("N (complete cases):", sum(!is.na(dat$total_time)), "\n")
+cat("N (missing):", sum(is.na(dat$total_time)), "\n")
+cat("\n")
+
+cat("total_time (minutes):\n")
+cat("  median:", median(dat$total_time, na.rm = TRUE), "\n")
+cat("  mean:", round(mean(dat$total_time, na.rm = TRUE), 1), "\n")
+cat("  sd:", round(sd(dat$total_time, na.rm = TRUE), 1), "\n")
+cat("  range:", range(dat$total_time, na.rm = TRUE), "\n")
+
+cat("\nforecast (minutes):\n")
+cat("  median:", median(dat$forecast), "\n")
+cat("  mean:", round(mean(dat$forecast), 1), "\n")
+cat("  sd:", round(sd(dat$forecast), 1), "\n")
+cat("  range:", range(dat$forecast), "\n")
+
+cat("\nai_access:\n")
+cat("  n(AI allowed):", sum(dat$ai_access == 1), "\n")
+cat("  n(AI restricted):", sum(dat$ai_access == 0), "\n")
+```
+
+# Model 1: Bayesian Regression
+
+## Model Structure
+
+We model completion time with a lognormal likelihood, regressing on treatment and forecast:
+
+$$y_i \sim \text{Lognormal}(\mu_i, \sigma)$$ $$\mu_i = \alpha + \beta_{\text{trt}} \cdot \text{ai_access}_i + \beta_{\text{forecast}} \cdot \log(\text{forecast}_i / 90)$$
+
+The baseline forecast is set to 90 minutes (approximately the median). This means:
+
+-   $\alpha$ = expected log(completion time) when forecast = 90 min and AI restricted
+-   $\exp(\alpha)$ = median completion time at baseline
+-   $\beta_{\text{trt}}$ = effect of AI access on log completion time
+-   $\beta_{\text{forecast}}$ = elasticity (if forecast doubles, completion time multiplies by $2^{\beta_{\text{forecast}}}$)
+
+## Prior Development
+
+We calibrate priors using domain expertise about plausible parameter ranges. For each parameter, we identify extremity thresholds and set the prior SD so that 1% of probability falls beyond each threshold.
+
+**Intercept (**$\alpha$): At baseline (forecast = 90 min, AI restricted), median completion time plausibly ranges from 45 to 180 minutes. On log scale: $\log(45) \approx 3.8$ to $\log(180) \approx 5.2$, centered at $\log(90) \approx 4.5$.
+
+$$\alpha \sim \text{Normal}(\log(90), 0.30)$$
+
+**Treatment effect (**$\beta_{\text{trt}}$): A 95% reduction (log change of -3) or 5x increase (log change of +1.6) from AI access would be implausible.
+
+$$\beta_{\text{trt}} \sim \text{Normal}(0, 0.7)$$
+
+**Forecast elasticity (**$\beta_{\text{forecast}}$): We expect forecasts to be predictive. An elasticity between 0.25 and 1.75 is plausible; values outside this range are unlikely.
+
+$$\beta_{\text{forecast}} \sim \text{Normal}(1, 0.32)$$
+
+**Residual dispersion (**$\sigma$): Starting with $\sigma = 1$ and tuning based on prior predictive checks. Goal: 99% of simulated completion times between 10 min and 24 hours.
+
+## Prior Predictive Check
+
+We simulate data from the prior to verify our priors produce plausible datasets before seeing any real data.
+
+```{r}
+#| label: model1-prior-data
+
+complete_idx <- !is.na(dat$total_time)
+
+stan_data <- list(
+  N = sum(complete_idx),
+  forecast = dat$forecast[complete_idx],
+  ai_access = dat$ai_access[complete_idx],
+  x0 = 90
+)
+```
+
+```{r}
+#| label: model1-prior-fit
+
+fit_prior <- stan(
+  file = "stan_programs/model1_prior.stan",
+  data = stan_data,
+  algorithm = "Fixed_param",
+  iter = 1000,
+  chains = 1,
+  seed = 1234
+)
+
+samples_prior <- util$extract_expectand_vals(fit_prior)
+```
+
+### Prior on $\alpha$ (log baseline median)
+
+Dashed lines show the extremity thresholds: log(45) and log(180) minutes.
+
+```{r}
+#| label: fig-prior-alpha
+#| fig-cap: "Prior on alpha: log(median completion time) at baseline"
+
+util$plot_line_hist(samples_prior$alpha, 3.5, 5.5, 0.1,
+                    xlab = "alpha (log minutes)")
+abline(v = log(45), lty = 2, lwd = 2)   # Lower threshold: 45 min
+abline(v = log(180), lty = 2, lwd = 2)  # Upper threshold: 180 min
+```
+
+### Prior on $\mu$ (log median completion time)
+
+Distribution of $\mu = \alpha + \beta_{\text{trt}} \cdot \text{ai_access} + \beta_{\text{forecast}} \cdot \log(\text{forecast}/90)$ across all observations and prior draws. Dashed lines show log(10 min) and log(24 hours) — the target range for plausible completion times.
+
+```{r}
+#| label: fig-prior-mu
+#| fig-cap: "Prior predictive: log median completion time (with treatment effect)"
+
+util$plot_hist_quantiles(samples_prior, 'mu', 0, 8, 0.25,
+                         xlab = "mu (log minutes)")
+abline(v = log(10), lty = 2, lwd = 2)    # 10 min
+abline(v = log(1440), lty = 2, lwd = 2)  # 24 hours
+```
+
+```{r}
+#| label: fig-prior-mu-no-trt
+#| fig-cap: "Prior predictive: log median completion time (no treatment effect)"
+
+util$plot_hist_quantiles(samples_prior, 'mu_no_trt', 0, 8, 0.25,
+                         xlab = "mu (log minutes)")
+abline(v = log(10), lty = 2, lwd = 2)    # 10 min
+abline(v = log(1440), lty = 2, lwd = 2)  # 24 hours
+```
+
+### Prior predictive on $y$ (completion time in minutes)
+
+The lognormal model adds dispersion $\sigma$ around the median. Dashed lines show the target range: 10 min to 24 hours (1440 min).
+
+```{r}
+#| label: fig-prior-y
+#| fig-cap: "Prior predictive: completion time (minutes)"
+
+util$plot_hist_quantiles(samples_prior, 'y_sim', 0, 1500, 25,
+                         xlab = "Completion time (minutes)")
+abline(v = 10, lty = 2, lwd = 2)    # 10 min
+abline(v = 1440, lty = 2, lwd = 2)  # 24 hours
+```
+
+```{r}
+#| label: fig-prior-y-no-trt
+#| fig-cap: "Prior predictive: completion time without treatment (minutes)"
+
+util$plot_hist_quantiles(samples_prior, 'y_sim_no_trt', 0, 1500, 25,
+                         xlab = "Completion time (minutes)")
+abline(v = 10, lty = 2, lwd = 2)    # 10 min
+abline(v = 1440, lty = 2, lwd = 2)  # 24 hours
+```
+
+### Prior predictive at baseline (forecast = 90 min, no treatment)
+
+Dashed lines show the alpha extremity thresholds on the original scale: 45 and 180 minutes.
+
+```{r}
+#| label: fig-prior-y-baseline
+#| fig-cap: "Prior predictive: completion time at baseline"
+
+util$plot_line_hist(samples_prior$y_sim_baseline, 0, 600, 20,
+                    xlab = "Completion time (minutes)")
+abline(v = 45, lty = 2, lwd = 2)   # Lower threshold
+abline(v = 180, lty = 2, lwd = 2)  # Upper threshold
+```
+
+### Prior predictive on log scale
+
+Dashed lines show log(10 min) and log(24 hours).
+
+```{r}
+#| label: fig-prior-log-y
+#| fig-cap: "Prior predictive: log completion time"
+
+util$plot_hist_quantiles(samples_prior, 'log_y_sim', 0, 10, 0.25,
+                         xlab = "log(completion time)")
+abline(v = log(10), lty = 2, lwd = 2)    # 10 min
+abline(v = log(1440), lty = 2, lwd = 2)  # 24 hours
+```
+
+### Prior on treatment effect (percentage lift)
+
+Since $\beta_{\text{trt}}$ is the treatment effect on the log scale, the percentage change in completion time from AI access is $(e^{\beta_{\text{trt}}} - 1) \times 100\%$. Negative values indicate speedup; positive values indicate slowdown. Dashed lines show the extremity thresholds: 95% reduction (-95%) and 5x increase (+400%).
+
+```{r}
+#| label: fig-prior-ate-pct
+#| fig-cap: "Prior on treatment effect: percentage change in completion time"
+
+pct_lift <- (exp(samples_prior$beta_trt) - 1) * 100
+util$plot_line_hist(pct_lift, -100, 500, 20,
+                    xlab = "Treatment effect (% change)")
+abline(v = 0, lty = 1, lwd = 1)          # No effect
+abline(v = -95, lty = 2, lwd = 2)        # 95% reduction (implausible)
+abline(v = 400, lty = 2, lwd = 2)        # 5x increase (implausible)
+```
+
+## Model Fitting
+
+```{r}
+#| label: model1-fit-data
+
+complete_idx <- !is.na(dat$total_time)
+
+stan_data_fit <- list(
+  N = sum(complete_idx),
+  y = dat$total_time[complete_idx],
+  forecast = dat$forecast[complete_idx],
+  ai_access = dat$ai_access[complete_idx],
+  x0 = 90
+)
+```
+
+```{r}
+#| label: model1-fit
+
+fit <- stan(
+  file = "stan_programs/model1.stan",
+  data = stan_data_fit,
+  seed = 8877273,
+  refresh = 100
+)
+```
+
+```{r}
+#| label: model1-diagnostics
+
+util$check_all_hmc_diagnostics(util$extract_hmc_diagnostics(fit))
+samples <- util$extract_expectand_vals(fit)
+util$check_all_expectand_diagnostics(samples)
+```
+
+## Posterior Retrodictive Checks
+
+### Log completion time
+
+Comparing posterior predictive distribution of log completion times against observed data (black histogram).
+
+```{r}
+#| label: fig-retro-log-y
+#| fig-cap: "Posterior retrodictive: log completion time"
+
+util$plot_hist_quantiles(samples, 'log_y_rep', 2, 8, 0.25,
+                         baseline_values = log(stan_data_fit$y),
+                         xlab = "log(completion time)")
+```
+
+### Treatment effect (percentage lift)
+
+Posterior distribution of the treatment effect as percentage change in completion time. The dashed line shows the observed difference in median completion times between AI-allowed and AI-restricted groups.
+
+```{r}
+#| label: fig-retro-ate-pct
+#| fig-cap: "Posterior: treatment effect (% change in completion time)"
+
+# Observed percentage difference in medians
+y_ai <- dat$total_time[complete_idx & dat$ai_access == 1]
+y_no_ai <- dat$total_time[complete_idx & dat$ai_access == 0]
+observed_pct_diff <- (median(y_ai) / median(y_no_ai) - 1) * 100
+
+util$plot_line_hist(samples$pct_lift, -80, 80, 5,
+                    xlab = "Treatment effect (% change)")
+abline(v = 0, lty = 1, lwd = 1)
+abline(v = observed_pct_diff, lty = 2, lwd = 2)
+```
+
+### Parameter summaries
+
+```{r}
+#| label: model1-summary
+
+print(fit, pars = c("alpha", "beta_trt", "beta_forecast", "sigma", "pct_lift"))
+```
+
+### Conditional mean by task exposure
+
+```{r}
+#| label: fig-retro-cond-exposure
+#| fig-cap: "Posterior retrodictive: completion time by prior task exposure"
+
+# Get complete case data (what was modeled)
+dat_complete <- dat[complete_idx, ]
+
+# Find which complete cases have non-NA exposure
+has_exposure <- !is.na(dat_complete$prior_task_exposure_1_to_5)
+
+# Indices into y_rep (1:N for complete cases)
+n_cond_mean <- which(has_exposure)
+
+# Covariate values and observed outcomes for these observations
+obs_xs <- dat_complete$prior_task_exposure_1_to_5[has_exposure]
+obs_ys <- dat_complete$total_time[has_exposure]
+
+# y_rep names for these observations
+names <- paste0('y_rep[', n_cond_mean, ']')
+
+util$plot_conditional_mean_quantiles(samples, names, obs_xs,
+                                     0.5, 5.5, 1, obs_ys,
+                                     xlab = "Prior task exposure (1-5)",
+                                     ylab = "Completion time (minutes)")
+```
+
+Conditional Means by Resource Needs
+
+```{r}
+#| label: fig-retro-cond-exposure
+#| fig-cap: "Posterior retrodictive: completion time by resource needs"
+
+# Get complete case data (what was modeled)
+dat_complete <- dat[complete_idx, ]
+
+# Find which complete cases have non-NA exposure
+has_resource_needs <- !is.na(dat_complete$external_resource_needs_1_to_3)
+
+# Indices into y_rep (1:N for complete cases)
+n_cond_mean <- which(has_resource_needs)
+
+# Covariate values and observed outcomes for these observations
+obs_xs <- dat_complete$external_resource_needs_1_to_3[has_resource_needs]
+obs_xs[obs_xs == 5] <- 3
+obs_ys <- dat_complete$total_time[has_resource_needs]
+
+# y_rep names for these observations
+names <- paste0('y_rep[', n_cond_mean, ']')
+
+util$plot_conditional_mean_quantiles(samples, names, obs_xs,
+                                     0.5, 3.5, 1, obs_ys,
+                                     xlab = "Resource Needs (1 to 3)",
+                                     ylab = "Completion time (minutes)")
 ```
