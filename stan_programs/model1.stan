@@ -11,7 +11,9 @@
 //   sigma ~ Half-Normal(0, 0.8 / 2.57)
 
 data {
-  int<lower=0> N;
+  int<lower=1> N;
+  int<lower=1> N_developers;
+  array[N] int<lower=1, upper=N_developers> dev_nums;
   vector<lower=0>[N] y;                      // Observed completion time (minutes)
   vector<lower=0>[N] forecast;               // Forecast time (minutes)
   array[N] int<lower=0, upper=1> ai_access;  // 1 = AI allowed, 0 = restricted
@@ -29,10 +31,10 @@ transformed data {
 }
 
 parameters {
-  real alpha;
-  real beta_trt;
-  real beta_forecast;
-  real<lower=0> sigma;
+  real alpha; // intercept: log median at baseline forecast and no AI
+  real beta_trt; // treatment coefficient
+  real beta_forecast; // forecast coefficient
+  real<lower=0> sigma; // completion time variability
 }
 
 model {
@@ -49,12 +51,22 @@ model {
 generated quantities {
   // Posterior predictive
   vector[N] mu = alpha + beta_trt * ai_access_vec + beta_forecast * log_forecast_ratio;
-  vector[N] y_rep;
-  vector[N] log_y_rep;
+  vector[N] y_pred;
+  vector[N] log_y_pred;
+
+  array[N_developers] real mean_outcome_dev_pred = rep_array(0, N_developers);
+  array[N_developers] real C = rep_array(0, N_developers);
 
   for (n in 1:N) {
-    y_rep[n] = lognormal_rng(mu[n], sigma);
-    log_y_rep[n] = log(y_rep[n]);
+    y_pred[n] = lognormal_rng(mu[n], sigma);
+    log_y_pred[n] = log(y_pred[n]);
+    
+    real delta = 0;
+    int c = dev_nums[n];
+
+    C[c] += 1;
+    delta = y_pred[n] - mean_outcome_dev_pred[c];
+    mean_outcome_dev_pred[c] += delta / C[c];
   }
 
   // Treatment effect as percentage lift

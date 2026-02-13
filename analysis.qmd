@@ -12,10 +12,14 @@ format:
 util <- new.env()
 source("mcmc_visualization_tools/r/mcmc_analysis_tools_rstan.R", local = util)
 source("mcmc_visualization_tools/r/mcmc_visualization_tools.R", local = util)
+source("functions.R", local=util)
 
 library(rstan)
 rstan_options(auto_write = TRUE)
 options(mc.cores = parallel::detectCores())
+
+# Color for prior overlay
+c_light_teal <- "#6BAED6"
 
 ```
 
@@ -34,6 +38,9 @@ dat$forecast <- dat$predicted_time_no_ai
 
 # Recode treatment: 1 = AI access, 0 = AI restricted
 dat$ai_access <- 1 - dat$ai_treatment
+
+dat$dev_num <- as.integer(factor(dat$dev_id))
+
 ```
 
 ```{r}
@@ -52,6 +59,17 @@ util$plot_line_hist(dat$total_time[!is.na(dat$total_time)],
 util$plot_line_hist(dat$forecast,
                     0, 800, 25,
                     xlab = "Forecast time (minutes)")
+```
+
+Mean developer outcomes
+
+```{r}
+
+mean_total_time_developer <-
+  sapply(1:max(dat$dev_num),
+         function(c) mean(dat$total_time[dat$dev_num == c & !is.na(dat$total_time)]))
+
+util$plot_line_hist(mean_total_time_developer)
 ```
 
 ```{r}
@@ -258,9 +276,12 @@ complete_idx <- !is.na(dat$total_time)
 
 stan_data_fit <- list(
   N = sum(complete_idx),
+  dev_nums = dat$dev_num[complete_idx],
+  N_developers = length(unique(dat$dev_num[complete_idx])),
   y = dat$total_time[complete_idx],
   forecast = dat$forecast[complete_idx],
   ai_access = dat$ai_access[complete_idx],
+  
   x0 = 90
 )
 ```
@@ -281,7 +302,9 @@ fit <- stan(
 
 util$check_all_hmc_diagnostics(util$extract_hmc_diagnostics(fit))
 samples <- util$extract_expectand_vals(fit)
-util$check_all_expectand_diagnostics(samples)
+base_samples <- util$filter_expectands(samples, c('beta_trt', 'alpha', 'beta_forecast', 'sigma'))
+util$check_all_expectand_diagnostics(base_samples)
+
 ```
 
 ## Posterior Retrodictive Checks
@@ -294,7 +317,7 @@ Comparing posterior predictive distribution of log completion times against obse
 #| label: fig-retro-log-y
 #| fig-cap: "Posterior retrodictive: log completion time"
 
-util$plot_hist_quantiles(samples, 'log_y_rep', 2, 8, 0.25,
+util$plot_hist_quantiles(samples, 'log_y_pred', 2, 8, 0.25,
                          baseline_values = log(stan_data_fit$y),
                          xlab = "log(completion time)")
 ```
@@ -346,7 +369,7 @@ obs_xs <- dat_complete$prior_task_exposure_1_to_5[has_exposure]
 obs_ys <- dat_complete$total_time[has_exposure]
 
 # y_rep names for these observations
-names <- paste0('y_rep[', n_cond_mean, ']')
+names <- paste0('y_pred[', n_cond_mean, ']')
 
 util$plot_conditional_mean_quantiles(samples, names, obs_xs,
                                      0.5, 5.5, 1, obs_ys,
@@ -375,10 +398,1952 @@ obs_xs[obs_xs == 5] <- 3
 obs_ys <- dat_complete$total_time[has_resource_needs]
 
 # y_rep names for these observations
-names <- paste0('y_rep[', n_cond_mean, ']')
+names <- paste0('y_pred[', n_cond_mean, ']')
 
 util$plot_conditional_mean_quantiles(samples, names, obs_xs,
                                      0.5, 3.5, 1, obs_ys,
                                      xlab = "Resource Needs (1 to 3)",
                                      ylab = "Completion time (minutes)")
+```
+
+Conditional means by forecast
+
+```{r}
+#| label: fig-retro-cond-exposure
+#| fig-cap: "Posterior retrodictive: completion time by forecast"
+
+# Get complete case data (what was modeled)
+dat_complete <- dat[complete_idx, ]
+
+# Find which complete cases have non-NA forecast
+has_forecast <- !is.na(dat_complete$forecast)
+
+# Indices into y_rep (1:N for complete cases)
+n_cond_mean <- which(has_forecast)
+
+# Covariate values and observed outcomes for these observations
+obs_xs <- dat_complete$forecast[has_forecast]
+obs_ys <- dat_complete$total_time[has_forecast]
+
+# y_rep names for these observations
+names <- paste0('y_pred[', n_cond_mean, ']')
+
+util$plot_conditional_mean_quantiles(samples, names, obs_xs,bin_min=0, bin_max=400,bin_delta = 50,
+                                    obs_ys,
+                                     xlab = "Forecast",
+                                     ylab = "Completion time (minutes)")
+```
+
+```{r}
+pred_names <- paste0('mean_outcome_dev_pred[',1:stan_data_fit$N_developers,']')
+util$plot_hist_quantiles(samples[pred_names], 'mean_outcome_dev_pred',
+                         #0, 3, 0.25,
+                         baseline_values=mean_total_time_developer,
+                         xlab="Developer-wise Average Total Time")
+
+```
+
+Next we'll model the ability of each developer which helps generate resource needs, prior task exposure, and completion time forecasts.
+
+# Model 2: Latent Task Burden
+
+## Model Structure
+
+We introduce a latent "task burden" variable that generates both forecasts and completion times:
+
+$$\text{task_burden}_i \sim \text{Normal}(0, \sigma_b)$$ $$\text{forecast}_i \sim \text{Lognormal}(\alpha_f + \text{task_burden}_i, \sigma_f)$$ $$y_i \sim \text{Lognormal}(\alpha_t + \beta_{\text{trt}} \cdot \text{ai_access}_i + \beta_{\text{burden}} \cdot \text{task_burden}_i, \sigma_t)$$
+
+This treats forecasts as outcomes of latent structure rather than inputs.
+
+### Marginalized Likelihood
+
+Fitting N latent task_burden parameters creates funnel geometry that HMC struggles to navigate. Since task_burden is normally distributed and appears linearly in both log-likelihoods, we can marginalize it out analytically.
+
+On the log scale, writing $f_i = \log(\text{forecast}_i)$ and $t_i = \log(y_i)$:
+
+$$f_i \mid \text{task_burden}_i \sim \text{Normal}(\alpha_f + \text{task_burden}_i, \sigma_f)$$ $$t_i \mid \text{task_burden}_i \sim \text{Normal}(\alpha_t + \beta_{\text{trt}} \cdot \text{ai_access}_i + \beta_{\text{burden}} \cdot \text{task_burden}_i, \sigma_t)$$
+
+The marginal means (integrating out task_burden):
+
+$$\mathbb{E}[f_i] = \alpha_f$$ $$\mathbb{E}[t_i] = \alpha_t + \beta_{\text{trt}} \cdot \text{ai_access}_i$$
+
+The marginal variances decompose into latent variance plus noise:
+
+$$\text{Var}(f_i) = \sigma_b^2 + \sigma_f^2$$ $$\text{Var}(t_i) = \beta_{\text{burden}}^2 \sigma_b^2 + \sigma_t^2$$
+
+The covariance arises from the shared latent task_burden:
+
+$$\text{Cov}(f_i, t_i) = \beta_{\text{burden}} \sigma_b^2$$
+
+This gives a bivariate normal likelihood:
+
+$$\begin{pmatrix} f_i \\ t_i \end{pmatrix} \sim \text{Normal}\left( \begin{pmatrix} \alpha_f \\ \alpha_t + \beta_{\text{trt}} \cdot \text{ai_access}_i \end{pmatrix}, \begin{pmatrix} \sigma_b^2 + \sigma_f^2 & \beta_{\text{burden}} \sigma_b^2 \\ \beta_{\text{burden}} \sigma_b^2 & \beta_{\text{burden}}^2 \sigma_b^2 + \sigma_t^2 \end{pmatrix} \right)$$
+
+The induced correlation between log-forecast and log-completion time is:
+
+$$\rho = \frac{\beta_{\text{burden}} \sigma_b^2}{\sqrt{(\sigma_b^2 + \sigma_f^2)(\beta_{\text{burden}}^2 \sigma_b^2 + \sigma_t^2)}}$$
+
+## Prior Development
+
+| Parameter | Prior | Interpretation |
+|------------------------|------------------------|------------------------|
+| σ_b | Half-Normal(0, 0.39) | Task burden spread; 99% \< 1 |
+| σ_f | Half-Normal(0, 0.39) | Forecast noise after burden; 99% \< 1 |
+| σ_t | Half-Normal(0, 0.25) | Completion noise after burden; 99% \< 0.64 |
+| α_f | Normal(log(90), 0.30) | Log median forecast at avg burden; 45-180 min |
+| α_t | Normal(log(90), 0.40) | Log median completion at avg burden; 35-230 min |
+| β_burden | Normal(1, 0.32) | Burden → completion; 0.25-1.75 |
+| β_trt | Normal(0, 0.7) | Treatment effect (same as Model 1) |
+
+## Prior Predictive Check
+
+```{r}
+#| label: model2-prior-data
+
+stan_data_m2 <- list(
+  N = sum(complete_idx),
+  ai_access = dat$ai_access[complete_idx]
+)
+```
+
+```{r}
+#| label: model2-prior-fit
+
+fit_prior_m2 <- stan(
+  file = "stan_programs/model2_prior.stan",
+  data = stan_data_m2,
+  algorithm = "Fixed_param",
+  iter = 1000,
+  chains = 1,
+  seed = 1234
+)
+
+samples_prior_m2 <- util$extract_expectand_vals(fit_prior_m2)
+```
+
+### Prior on simulated forecasts
+
+Dashed lines show 10 min and 24 hours (1440 min).
+
+```{r}
+#| label: fig-m2-prior-forecast
+#| fig-cap: "Model 2 prior predictive: forecast times (minutes)"
+
+util$plot_hist_quantiles(samples_prior_m2, 'forecast_sim', 0, 1500, 25,
+                         xlab = "Forecast time (minutes)")
+abline(v = 10, lty = 2, lwd = 2)
+abline(v = 1440, lty = 2, lwd = 2)
+```
+
+```{r}
+#| label: fig-m2-prior-log-forecast
+#| fig-cap: "Model 2 prior predictive: log forecast times"
+
+util$plot_hist_quantiles(samples_prior_m2, 'log_forecast_sim', 0, 10, 0.25,
+                         xlab = "log(forecast time)")
+abline(v = log(10), lty = 2, lwd = 2)
+abline(v = log(1440), lty = 2, lwd = 2)
+```
+
+### Prior on simulated completion times
+
+```{r}
+#| label: fig-m2-prior-y
+#| fig-cap: "Model 2 prior predictive: completion time (minutes)"
+
+util$plot_hist_quantiles(samples_prior_m2, 'y_sim', 0, 1500, 25,
+                         xlab = "Completion time (minutes)")
+abline(v = 10, lty = 2, lwd = 2)
+abline(v = 1440, lty = 2, lwd = 2)
+```
+
+```{r}
+#| label: fig-m2-prior-log-y
+#| fig-cap: "Model 2 prior predictive: log completion time"
+
+util$plot_hist_quantiles(samples_prior_m2, 'log_y_sim', 0, 10, 0.25,
+                         xlab = "log(completion time)")
+abline(v = log(10), lty = 2, lwd = 2)
+abline(v = log(1440), lty = 2, lwd = 2)
+```
+
+### Prior on treatment effect (percentage lift)
+
+```{r}
+#| label: fig-m2-prior-ate-pct
+#| fig-cap: "Model 2 prior: treatment effect (% change)"
+
+pct_lift_m2 <- (exp(samples_prior_m2$beta_trt) - 1) * 100
+util$plot_line_hist(pct_lift_m2, -100, 500, 20,
+                    xlab = "Treatment effect (% change)")
+abline(v = 0, lty = 1, lwd = 1)
+abline(v = -95, lty = 2, lwd = 2)
+abline(v = 400, lty = 2, lwd = 2)
+```
+
+## Model Fitting
+
+The latent task burden model has N latent parameters (one per observation), which creates funnel geometry that HMC struggles to navigate. We marginalize out the latent task_burden analytically, yielding a bivariate normal likelihood for (log_forecast, log_y) with correlation induced by the shared latent structure.
+
+```{r}
+#| label: model2-fit-data
+
+stan_data_m2_fit <- list(
+  N = sum(complete_idx),
+  y = dat$total_time[complete_idx],
+  forecast = dat$forecast[complete_idx],
+  ai_access = dat$ai_access[complete_idx]
+)
+```
+
+```{r}
+#| label: model2-fit
+
+fit_m2 <- stan(
+  file = "stan_programs/model2_marginalized.stan",
+  data = stan_data_m2_fit,
+  seed = 5678,
+  refresh = 100,
+  control = list(adapt_delta=0.95)
+)
+```
+
+```{r}
+#| label: model2-diagnostics
+
+util$check_all_hmc_diagnostics(util$extract_hmc_diagnostics(fit_m2))
+samples_m2 <- util$extract_expectand_vals(fit_m2)
+base_samples_m2 <- util$filter_expectands(samples_m2, c('beta_trt', 'alpha_f', 'alpha_t', 'beta_burden', 'sigma_b', 'sigma_f', 'sigma_t'))
+util$check_all_expectand_diagnostics(base_samples_m2)
+```
+
+## Posterior Retrodictive Checks
+
+### Log completion time
+
+```{r}
+#| label: fig-m2-retro-log-y
+#| fig-cap: "Model 2 posterior retrodictive: log completion time"
+
+util$plot_hist_quantiles(samples_m2, 'log_y_pred', 2, 8, 0.25,
+                         baseline_values = log(stan_data_m2_fit$y),
+                         xlab = "log(completion time)")
+```
+
+### Log forecast time
+
+```{r}
+#| label: fig-m2-retro-log-forecast
+#| fig-cap: "Model 2 posterior retrodictive: log forecast time"
+
+util$plot_hist_quantiles(samples_m2, 'log_forecast_pred', 2, 8, 0.25,
+                         baseline_values = log(stan_data_m2_fit$forecast),
+                         xlab = "log(forecast time)")
+```
+
+### Treatment effect (percentage lift)
+
+```{r}
+#| label: fig-m2-retro-ate-pct
+#| fig-cap: "Model 2 posterior: treatment effect (% change)"
+
+# Observed percentage difference in medians
+y_ai <- dat$total_time[complete_idx & dat$ai_access == 1]
+y_no_ai <- dat$total_time[complete_idx & dat$ai_access == 0]
+observed_pct_diff <- (median(y_ai) / median(y_no_ai) - 1) * 100
+
+util$plot_line_hist(samples_m2$pct_lift, -80, 80, 5,
+                    xlab = "Treatment effect (% change)")
+abline(v = 0, lty = 1, lwd = 1)
+abline(v = observed_pct_diff, lty = 2, lwd = 2)
+```
+
+### Posterior on induced correlation
+
+The correlation between log(forecast) and log(completion time) induced by the shared task burden:
+
+```{r}
+#| label: fig-m2-post-rho
+#| fig-cap: "Model 2 posterior: induced correlation between forecast and completion time"
+
+util$plot_line_hist(samples_m2$rho, 0, 1, 0.05,
+                    xlab = "Correlation (rho)")
+```
+
+### Parameter summaries
+
+```{r}
+#| label: model2-summary
+
+print(fit_m2, pars = c("alpha_f", "alpha_t", "beta_burden", "beta_trt",
+                        "sigma_b", "sigma_f", "sigma_t", "pct_lift",
+                        "var_f", "var_t", "rho"))
+```
+
+### Compare Model 1 vs Model 2 treatment effects
+
+```{r}
+#| label: fig-compare-ate
+#| fig-cap: "Comparison: treatment effect estimates"
+
+# Model 1 posterior
+pct_lift_m1 <- samples$pct_lift
+
+# Model 2 posterior
+pct_lift_m2_post <- samples_m2$pct_lift
+
+# Plot both
+util$plot_line_hist(pct_lift_m1, -80, 80, 5,
+                    xlab = "Treatment effect (% change)",col = 'blue',prob = T)
+util$plot_line_hist(pct_lift_m2_post, -80, 80, 5, add = TRUE,
+                    col = 'darkgreen', prob=T)
+legend("topright", c("Model 1", "Model 2"),
+       fill = c('blue', 'darkgreen'))
+```
+
+# Model 3: Negative Binomial Forecasts with Latent Task Burden
+
+## Model Structure
+
+We replace the lognormal likelihood for forecasts with a Negative Binomial likelihood on the scaled values. Since forecasts come in increments of 5 minutes, we model:
+
+```         
+forecast = 5 * Z,  where Z ~ NegBinomial2(mu, phi)
+log(mu) = alpha_f + task_burden
+```
+
+We parameterize overdispersion as `kappa = 1/phi`, so:
+
+```         
+Var(Z) = mu + mu^2 * kappa
+```
+
+-   kappa = 0: Poisson (no overdispersion)
+-   kappa \> 0: overdispersed (larger kappa = more variance)
+
+The full generative structure:
+
+```         
+task_burden[n] ~ Normal(0, sigma_b)
+forecast_int[n] ~ NegBinomial2(exp(alpha_f + task_burden[n]), 1/kappa)
+y[n] ~ Lognormal(alpha_t + beta_trt * ai_access[n] + beta_burden * task_burden[n], sigma_t)
+```
+
+where `forecast_int = round(forecast / 5)`.
+
+This model is *not* marginalized — we estimate task_burden explicitly. The discrete likelihood may provide better geometry than the continuous lognormal.
+
+## Prior Development
+
+| Parameter | Prior | Interpretation |
+|------------------------|------------------------|------------------------|
+| sigma_b | Half-Normal(0, 0.39) | Task burden spread; 99% \< 1 |
+| sigma_t | Half-Normal(0, 0.25) | Completion noise; 99% \< 0.64 |
+| kappa | Half-Normal(0, 0.10) | Overdispersion; 99% \< 0.25; SD(forecast) \< 50 min |
+| alpha_f | Normal(log(18), 0.30) | Log expected forecast/5 at avg burden; 9-36 |
+| alpha_t | Normal(log(90), 0.40) | Log median completion at avg burden |
+| beta_burden | Normal(1, 0.32) | Burden effect on completion; 0.25-1.75 |
+| beta_trt | Normal(0, 0.7) | Treatment effect |
+
+## Model Fitting
+
+```{r}
+#| label: model3-fit
+
+fit_m3 <- stan(
+  file = "stan_programs/model3.stan",
+  data = stan_data_m2_fit,
+  seed = 91011,
+  refresh = 200,
+  control = list(adapt_delta=0.9)
+)
+```
+
+```{r}
+#| label: model3-diagnostics
+
+util$check_all_hmc_diagnostics(util$extract_hmc_diagnostics(fit_m3))
+samples_m3 <- util$extract_expectand_vals(fit_m3)
+base_samples_m3 <- util$filter_expectands(samples_m3,
+  c('beta_trt', 'alpha_f', 'alpha_t', 'beta_burden', 'sigma_b', 'sigma_t', 'kappa', 'phi'))
+util$check_all_expectand_diagnostics(base_samples_m3)
+```
+
+## Posterior Retrodictive Checks
+
+### Log completion time
+
+```{r}
+#| label: fig-m3-retro-log-y
+#| fig-cap: "Model 3 posterior retrodictive: log completion time"
+
+util$plot_hist_quantiles(samples_m3, 'log_y_pred', 2, 8, 0.25,
+                         baseline_values = log(stan_data_m2_fit$y),
+                         xlab = "log(completion time)")
+```
+
+### Forecast (on original scale)
+
+```{r}
+#| label: fig-m3-retro-forecast
+#| fig-cap: "Model 3 posterior retrodictive: forecast time"
+
+util$plot_hist_quantiles(samples_m3, 'forecast_pred', 0, 800, 25,
+                         baseline_values = stan_data_m2_fit$forecast,
+                         xlab = "Forecast time (minutes)")
+```
+
+### Treatment effect
+
+```{r}
+#| label: fig-m3-retro-ate-pct
+#| fig-cap: "Model 3 posterior: treatment effect (% change)"
+
+y_ai <- dat$total_time[complete_idx & dat$ai_access == 1]
+y_no_ai <- dat$total_time[complete_idx & dat$ai_access == 0]
+observed_pct_diff <- (median(y_ai) / median(y_no_ai) - 1) * 100
+
+util$plot_line_hist(samples_m3$pct_lift, -80, 80, 5,
+                    xlab = "Treatment effect (% change)")
+abline(v = 0, lty = 1, lwd = 1)
+abline(v = observed_pct_diff, lty = 2, lwd = 2)
+```
+
+### Parameter summaries
+
+```{r}
+#| label: model3-summary
+
+print(fit_m3, pars = c("alpha_f", "alpha_t", "beta_burden", "beta_trt",
+                        "sigma_b", "sigma_t", "kappa", "phi", "pct_lift"))
+```
+
+### Prior vs Posterior Comparisons
+
+```{r}
+#| label: fig-m3-prior-post-sigma-b
+#| fig-cap: "Model 3: Prior (teal) vs Posterior for sigma_b"
+
+util$plot_expectand_pushforward(samples_m3[["sigma_b"]], 25,
+                                display_name = "sigma_b", flim = c(0, 1.5))
+xs <- seq(0, 1.5, 0.01)
+ys <- 2 * dnorm(xs, 0, 0.39)
+lines(xs, ys, lwd = 2, col = c_light_teal)
+```
+
+```{r}
+#| label: fig-m3-prior-post-sigma-t
+#| fig-cap: "Model 3: Prior (teal) vs Posterior for sigma_t"
+
+util$plot_expectand_pushforward(samples_m3[["sigma_t"]], 25,
+                                display_name = "sigma_t", flim = c(0, 0.8))
+xs <- seq(0, 0.8, 0.01)
+ys <- 2 * dnorm(xs, 0, 0.25)
+lines(xs, ys, lwd = 2, col = c_light_teal)
+```
+
+```{r}
+#| label: fig-m3-prior-post-kappa
+#| fig-cap: "Model 3: Prior (teal) vs Posterior for kappa (overdispersion)"
+
+util$plot_expectand_pushforward(samples_m3[["kappa"]], 25,
+                                display_name = "kappa", flim = c(0, 0.5))
+xs <- seq(0, 0.5, 0.005)
+ys <- 2 * dnorm(xs, 0, 0.10)
+lines(xs, ys, lwd = 2, col = c_light_teal)
+```
+
+```{r}
+#| label: fig-m3-prior-post-alpha-f
+#| fig-cap: "Model 3: Prior (teal) vs Posterior for alpha_f"
+
+util$plot_expectand_pushforward(samples_m3[["alpha_f"]], 25,
+                                display_name = "alpha_f", flim = c(1.5, 4))
+xs <- seq(1.5, 4, 0.01)
+ys <- dnorm(xs, log(17), 0.30)
+lines(xs, ys, lwd = 2, col = c_light_teal)
+```
+
+```{r}
+#| label: fig-m3-prior-post-alpha-t
+#| fig-cap: "Model 3: Prior (teal) vs Posterior for alpha_t"
+
+util$plot_expectand_pushforward(samples_m3[["alpha_t"]], 25,
+                                display_name = "alpha_t", flim = c(3, 6))
+xs <- seq(3, 6, 0.01)
+ys <- dnorm(xs, log(90), 0.40)
+lines(xs, ys, lwd = 2, col = c_light_teal)
+```
+
+```{r}
+#| label: fig-m3-prior-post-beta-burden
+#| fig-cap: "Model 3: Prior (teal) vs Posterior for beta_burden"
+
+util$plot_expectand_pushforward(samples_m3[["beta_burden"]], 25,
+                                display_name = "beta_burden", flim = c(0, 2.5))
+xs <- seq(0, 2.5, 0.01)
+ys <- dnorm(xs, 1, 0.32)
+lines(xs, ys, lwd = 2, col = c_light_teal)
+```
+
+```{r}
+#| label: fig-m3-prior-post-beta-trt
+#| fig-cap: "Model 3: Prior (teal) vs Posterior for beta_trt"
+
+util$plot_expectand_pushforward(samples_m3[["beta_trt"]], 25,
+                                display_name = "beta_trt", flim = c(-2, 2))
+xs <- seq(-2, 2, 0.01)
+ys <- dnorm(xs, 0, 0.7)
+lines(xs, ys, lwd = 2, col = c_light_teal)
+```
+
+### Compare treatment effects across models
+
+```{r}
+#| label: fig-compare-ate-all
+#| fig-cap: "Comparison: treatment effect estimates across all models"
+
+util$plot_line_hist(samples$pct_lift, -80, 80, 5,
+                    xlab = "Treatment effect (% change)", col = 'blue', prob = TRUE)
+util$plot_line_hist(samples_m2$pct_lift, -80, 80, 5, add = TRUE,
+                    col = 'darkgreen', prob = TRUE)
+util$plot_line_hist(samples_m3$pct_lift, -80, 80, 5, add = TRUE,
+                    col = 'darkorange', prob = TRUE)
+legend("topright", c("Model 1", "Model 2 (marginalized)", "Model 3 (Poisson)"),
+       fill = c('blue', 'darkgreen', 'darkorange'))
+```
+
+# Appendix: Investigating Funnel Geometry in Non-Marginalized Model 2
+
+The non-marginalized Model 2 (with explicit task_burden parameters) exhibits severe sampling issues. With very low E-FMI (\< 0.2) but few divergences, the problem is not that the sampler is crashing — it's that the sampler is moving *extremely slowly* through the funnel geometry. HMC adapts by taking tiny steps to avoid diverging, but this results in poor exploration (low ESS) and chains that don't mix.
+
+## Fit Non-Marginalized Model
+
+```{r}
+#| label: model2-nonmarg-fit
+
+fit_m2_nonmarg <- stan(
+  file = "stan_programs/model2.stan",
+  data = stan_data_m2_fit,
+  seed = 5678,
+  refresh = 0
+)
+```
+
+```{r}
+#| label: model2-nonmarg-diagnostics
+
+diagnostics_m2_nonmarg <- util$extract_hmc_diagnostics(fit_m2_nonmarg)
+util$check_all_hmc_diagnostics(diagnostics_m2_nonmarg)
+
+samples_m2_nonmarg <- util$extract_expectand_vals(fit_m2_nonmarg)
+```
+
+## Understanding Low E-FMI
+
+E-FMI (Energy Fraction of Missing Information) measures how effectively momentum helps explore the posterior. When E-FMI is very low:
+
+-   The sampler's momentum isn't carrying it efficiently through parameter space
+-   Chains diffuse slowly rather than making large jumps
+-   Different chains may get stuck in different regions
+-   ESS will be low even without divergences
+
+This happens in funnel geometry because:
+
+1.  The narrow neck (small σ_b) requires tiny step sizes
+2.  The wide mouth (large σ_b) could use larger steps
+3.  HMC uses a single adapted step size — too large for the neck, too small for the mouth
+4.  The sampler survives but crawls through the space
+
+## Visualizing Poor Mixing
+
+We use `plot_pairs_by_chain` to see how each chain explores the (σ_b, task_burden) space over iterations. Colors indicate iteration order (light = early, dark = late). Well-mixing chains would show all colors covering the same region; poorly-mixing chains show clusters or slow drift.
+
+```{r}
+#| label: fig-pairs-chain-sigma-burden
+#| fig-cap: "Pairs by chain: sigma_b vs task_burden[1]. Color = iteration (light=early, dark=late)"
+#| fig-width: 10
+#| fig-height: 8
+
+util$plot_pairs_by_chain(
+  samples_m2_nonmarg[["sigma_b"]], "sigma_b",
+  samples_m2_nonmarg[["task_burden[1]"]], "task_burden[1]"
+)
+```
+
+If chains are mixing well, all four panels should show similar coverage with colors interspersed. If chains are stuck or slowly drifting, you'll see:
+
+-   Different chains in different regions
+-   Color gradients showing slow drift rather than rapid mixing
+-   Clusters of similar-colored points
+
+```{r}
+#| label: fig-pairs-chain-sigmas
+#| fig-cap: "Pairs by chain: sigma_b vs sigma_f"
+#| fig-width: 10
+#| fig-height: 8
+
+util$plot_pairs_by_chain(
+  samples_m2_nonmarg[["sigma_b"]], "sigma_b",
+  samples_m2_nonmarg[["sigma_f"]], "sigma_f"
+)
+```
+
+## The Funnel Geometry
+
+Even without many divergences, we can visualize the funnel by plotting σ_b against task_burden. The characteristic shape: when σ_b is small, task_burden is constrained near zero; when σ_b is large, task_burden spreads out.
+
+```{r}
+#| label: fig-funnel-sigma-b
+#| fig-cap: "Funnel geometry: log(sigma_b) vs selected task_burden parameters"
+#| fig-width: 10
+#| fig-height: 8
+
+util$plot_div_pairs(
+  x_names = c("sigma_b"),
+  y_names = c("task_burden[1]", "task_burden[10]", "task_burden[20]",
+              "task_burden[50]", "task_burden[100]", "task_burden[150]"),
+  expectand_vals_list = samples_m2_nonmarg,
+  diagnostics = diagnostics_m2_nonmarg,
+  transforms = list("sigma_b" = 1),
+  plot_mode = 0
+)
+```
+
+## Trajectory Lengths
+
+When the sampler struggles with geometry, it often shows unusual trajectory length patterns. Very short trajectories indicate the sampler is U-turning quickly (possibly stuck); very long trajectories may indicate difficulty finding the right direction.
+
+```{r}
+#| label: fig-leapfrogs
+#| fig-cap: "Distribution of numerical trajectory lengths by chain"
+
+util$plot_num_leapfrogs_by_chain(diagnostics_m2_nonmarg)
+```
+
+## Comparing Adapted Step Sizes
+
+Each chain adapts its own step size. Large variation between chains, or very small step sizes, can indicate geometric problems.
+
+```{r}
+#| label: stepsizes
+
+util$display_stepsizes(diagnostics_m2_nonmarg)
+```
+
+## Distribution of Divergences (if any)
+
+```{r}
+#| label: fig-div-marginal-sigma-b
+#| fig-cap: "Marginal distribution of sigma_b: divergent (green) vs non-divergent (gray)"
+
+divs <- diagnostics_m2_nonmarg[['divergent__']]
+div_idx <- which(c(t(divs)) == 1)
+nondiv_idx <- which(c(t(divs)) == 0)
+
+sigma_b_vals <- c(t(samples_m2_nonmarg[['sigma_b']]))
+
+hist(sigma_b_vals[nondiv_idx], breaks = 30, col = "gray80", border = "gray60",
+     main = "", xlab = "sigma_b", freq = FALSE)
+if (length(div_idx) > 0) {
+  hist(sigma_b_vals[div_idx], breaks = 30, col = rgb(0, 1, 0, 0.5),
+       border = "darkgreen", add = TRUE, freq = FALSE)
+  legend("topright", c("Non-divergent", "Divergent"),
+         fill = c("gray80", rgb(0, 1, 0, 0.5)))
+}
+```
+
+If divergences cluster at small σ_b values, this confirms the funnel geometry problem.
+
+```{r}
+  K <- 3
+  rho <- rep(1/3, K)  # Symmetric baseline
+
+  # Explore different tau values
+  tau_values <- c(0.1, 0.25, 0.5, 1.0, 2.0)
+  n_samples <- 2000
+
+  par(mfrow = c(2, 3))
+
+  for (tau in tau_values) {
+    # Sample simplices from Dirichlet
+    p_samples <- util$rdirichlet(n_samples, rho, tau)
+
+    alpha <- rho / tau + 1
+
+    # Boxplot of category probabilities
+    boxplot(p_samples, names = c("P(R=1)", "P(R=2)", "P(R=3)"),
+            main = paste0("tau = ", tau, "\nalpha = (",
+                          round(alpha[1], 2), ", ",
+                          round(alpha[2], 2), ", ",
+                          round(alpha[3], 2), ")"),
+            ylim = c(0, 1), col = c(util$c_dark, util$c_mid_highlight, util$c_light))
+    abline(h = 1/3, lty = 2, col = "gray")
+  }
+
+  # Cutpoint distributions
+  par(mfrow = c(2, 3))
+
+  for (tau in tau_values) {
+    p_samples <- util$rdirichlet(n_samples, rho, tau)
+
+    # Derive cutpoints for each sample
+    cuts <- t(apply(p_samples, 1, util$derived_cut_points))
+
+    plot(cuts[, 1], cuts[, 2], pch = 16, cex = 0.3, col = rgb(0, 0, 0, 0.2),
+         xlim = c(-4, 4), ylim = c(-4, 4),
+         xlab = "c1", ylab = "c2",
+         main = paste0("Cutpoints: tau = ", tau))
+    abline(h = 0, v = 0, lty = 2, col = "gray")
+  }
+```
+
+# Model 4: Task Burden with Resources
+
+## Model Structure
+
+We extend Model 3 to include the ordinal resources variable. Task burden now generates three outcomes: forecasts, resources, and completion times.
+
+$$\text{task\_burden}_n \sim \text{Normal}(0, \sigma_b)$$
+
+**Forecasts** (as in M3): $$\text{forecast}_n = 5 \cdot (Z_n + 1), \quad Z_n \sim \text{NegBinomial2}(\exp(\alpha_f + \text{task\_burden}_n), \phi)$$
+
+**Resources** (ordinal 1-3): $$\text{resources}_n \sim \text{OrderedLogistic}(\lambda_r \cdot \text{task\_burden}_n, \mathbf{c})$$
+
+where cutpoints $\mathbf{c}$ are derived from a Dirichlet prior on baseline probabilities: $$\mathbf{p} \sim \text{Dirichlet}(\boldsymbol{\alpha}), \quad \boldsymbol{\alpha} = \boldsymbol{\rho}/\tau + \mathbf{1}$$ $$c_1 = \text{logit}(p_1), \quad c_2 = \text{logit}(p_1 + p_2)$$
+
+**Completion time**: $$y_n \sim \text{Lognormal}(\alpha_t + \beta_{\text{trt}} \cdot \text{ai\_access}_n + \beta_{\text{burden}} \cdot \text{task\_burden}_n, \sigma_t)$$
+
+## Prior Development
+
+### Parameters from M3 (unchanged)
+
+| Parameter | Prior | Interpretation |
+|------------------------|------------------------|------------------------|
+| $\sigma_b$ | Half-Normal(0, 0.39) | Task burden spread; 99% \< 1 |
+| $\sigma_t$ | Half-Normal(0, 0.25) | Completion noise; 99% \< 0.64 |
+| $\kappa$ | Half-Normal(0, 0.10) | Forecast overdispersion |
+| $\alpha_f$ | Normal(log(17), 0.30) | Log expected (forecast/5 - 1) |
+| $\alpha_t$ | Normal(log(90), 0.40) | Log median completion |
+| $\beta_{\text{burden}}$ | Normal(1, 0.32) | Burden → completion; 0.25-1.75 |
+| $\beta_{\text{trt}}$ | Normal(0, 0.7) | Treatment effect |
+
+### New parameters for resources
+
+| Parameter | Prior | Interpretation |
+|------------------------|------------------------|------------------------|
+| $\boldsymbol{\rho}$ | (1/3, 1/3, 1/3) | Symmetric baseline for Dirichlet |
+| $\tau$ | 0.2 (fixed) | Dirichlet concentration; $\alpha = (2.67, 2.67, 2.67)$ |
+| $\lambda_r$ | Normal(1, 0.43) | Burden → resources; positive, 99% \< 2 |
+
+## Prior Predictive Check
+
+```{r}
+#| label: model4-prior-data
+
+stan_data_m4_prior <- list(
+  N = sum(complete_idx),
+  ai_access = dat$ai_access[complete_idx],
+  rho = rep(1/3, 3),
+  tau = 0.2
+)
+```
+
+```{r}
+#| label: model4-prior-fit
+
+fit_prior_m4 <- stan(
+  file = "stan_programs/model4_prior.stan",
+  data = stan_data_m4_prior,
+  algorithm = "Fixed_param",
+  iter = 1000,
+  chains = 1,
+  seed = 4321
+)
+
+samples_prior_m4 <- util$extract_expectand_vals(fit_prior_m4)
+```
+
+### Prior on lambda_r (burden → resources coefficient)
+
+```{r}
+#| label: fig-m4-prior-lambda-r
+#| fig-cap: "Prior on lambda_r: effect of task burden on resource needs"
+
+util$plot_line_hist(samples_prior_m4$lambda_r, -1, 3, 0.1,
+                    xlab = "lambda_r")
+abline(v = 0, lty = 2, lwd = 2)
+abline(v = 1, lty = 1, lwd = 1, col = "gray")
+```
+
+### Prior on baseline probabilities
+
+```{r}
+#| label: fig-m4-prior-baseline-probs
+#| fig-cap: "Prior on baseline ordinal probabilities (at eta = 0)"
+
+par(mfrow = c(1, 3))
+for (k in 1:3) {
+  util$plot_line_hist(samples_prior_m4[[paste0("baseline_p[", k, "]")]],
+                      0, 1, 0.05,
+                      xlab = paste0("P(R = ", k, ")"),
+                      main = paste0("Baseline P(R = ", k, ")"))
+  abline(v = 1/3, lty = 2, lwd = 2, col = "red")
+}
+```
+
+### Prior on cut points
+
+```{r}
+#| label: fig-m4-prior-cutpoints
+#| fig-cap: "Prior on derived cut points"
+
+par(mfrow = c(1, 2))
+util$plot_line_hist(samples_prior_m4[["cut_points[1]"]], -3, 3, 0.15,
+                    xlab = "c1", main = "Cut point 1")
+abline(v = 0, lty = 2, lwd = 2)
+
+util$plot_line_hist(samples_prior_m4[["cut_points[2]"]], -3, 3, 0.15,
+                    xlab = "c2", main = "Cut point 2")
+abline(v = 0, lty = 2, lwd = 2)
+```
+
+### Prior predictive: simulated resource distribution
+
+```{r}
+#| label: fig-m4-prior-resources-dist
+#| fig-cap: "Prior predictive: proportion in each resource category"
+
+par(mfrow = c(1, 3))
+util$plot_line_hist(samples_prior_m4$prop_resources_1, 0, 1, 0.025,
+                    xlab = "Proportion", main = "P(R = 1) in simulated data")
+abline(v = 1/3, lty = 2, lwd = 2)
+
+util$plot_line_hist(samples_prior_m4$prop_resources_2, 0, 1, 0.025,
+                    xlab = "Proportion", main = "P(R = 2) in simulated data")
+abline(v = 1/3, lty = 2, lwd = 2)
+
+util$plot_line_hist(samples_prior_m4$prop_resources_3, 0, 1, 0.025,
+                    xlab = "Proportion", main = "P(R = 3) in simulated data")
+abline(v = 1/3, lty = 2, lwd = 2)
+```
+
+### Prior predictive: forecasts
+
+```{r}
+#| label: fig-m4-prior-forecast
+#| fig-cap: "Model 4 prior predictive: forecast times (minutes)"
+
+util$plot_hist_quantiles(samples_prior_m4, 'forecast_sim', 0, 800, 25,
+                         xlab = "Forecast time (minutes)")
+abline(v = 10, lty = 2, lwd = 2)
+abline(v = 1440, lty = 2, lwd = 2)
+```
+
+### Prior predictive: completion times
+
+```{r}
+#| label: fig-m4-prior-y
+#| fig-cap: "Model 4 prior predictive: completion time (minutes)"
+
+util$plot_hist_quantiles(samples_prior_m4, 'y_sim', 0, 1500, 25,
+                         xlab = "Completion time (minutes)")
+abline(v = 10, lty = 2, lwd = 2)
+abline(v = 1440, lty = 2, lwd = 2)
+```
+
+### Prior predictive: log completion time
+
+```{r}
+#| label: fig-m4-prior-log-y
+#| fig-cap: "Model 4 prior predictive: log completion time"
+
+util$plot_hist_quantiles(samples_prior_m4, 'log_y_sim', 0, 10, 0.25,
+                         xlab = "log(completion time)")
+abline(v = log(10), lty = 2, lwd = 2)
+abline(v = log(1440), lty = 2, lwd = 2)
+```
+
+### Prior on treatment effect
+
+```{r}
+#| label: fig-m4-prior-ate-pct
+#| fig-cap: "Model 4 prior: treatment effect (% change)"
+
+pct_lift_m4_prior <- (exp(samples_prior_m4$beta_trt) - 1) * 100
+util$plot_line_hist(pct_lift_m4_prior, -100, 500, 20,
+                    xlab = "Treatment effect (% change)")
+abline(v = 0, lty = 1, lwd = 1)
+abline(v = -95, lty = 2, lwd = 2)
+abline(v = 400, lty = 2, lwd = 2)
+```
+
+## Model Fitting
+
+```{r}
+#| label: model4-fit-data
+
+# Prepare resources data (handle missingness)
+dat_complete <- dat[complete_idx, ]
+
+# Recode resources: 5 -> 3 (as done earlier in EDA)
+resources_raw <- dat_complete$external_resource_needs_1_to_3
+resources_raw[resources_raw == 5] <- 3
+
+# Indices of observed resources
+obs_resources_idx <- which(!is.na(resources_raw))
+
+stan_data_m4 <- list(
+  N = sum(complete_idx),
+  y = dat$total_time[complete_idx],
+  forecast = dat$forecast[complete_idx],
+  ai_access = dat$ai_access[complete_idx],
+
+  # Resources with missingness
+  N_obs_resources = length(obs_resources_idx),
+  resources_idx = obs_resources_idx,
+  resources = resources_raw[obs_resources_idx],
+
+  # Dirichlet hyperparameters
+  rho = rep(1/3, 3),
+  tau = 0.2
+)
+```
+
+```{r}
+#| label: model4-fit
+
+fit_m4 <- stan(
+  file = "stan_programs/model4.stan",
+  data = stan_data_m4,
+  seed = 12131415,
+  iter = 4000,
+  refresh = 200,
+  control = list(adapt_delta = 0.9)
+)
+```
+
+```{r}
+#| label: model4-diagnostics
+
+util$check_all_hmc_diagnostics(util$extract_hmc_diagnostics(fit_m4))
+samples_m4 <- util$extract_expectand_vals(fit_m4)
+base_samples_m4 <- util$filter_expectands(samples_m4,
+  c('beta_trt', 'alpha_f', 'alpha_t', 'beta_burden', 'lambda_r',
+    'sigma_b', 'sigma_t', 'kappa'))  # phi = 1/kappa has tail issues, monitor kappa instead
+util$check_all_expectand_diagnostics(base_samples_m4)
+```
+
+## Posterior Retrodictive Checks
+
+### Log completion time
+
+```{r}
+#| label: fig-m4-retro-log-y
+#| fig-cap: "Model 4 posterior retrodictive: log completion time"
+
+util$plot_hist_quantiles(samples_m4, 'log_y_pred', 2, 8, 0.25,
+                         baseline_values = log(stan_data_m4$y),
+                         xlab = "log(completion time)")
+```
+
+### Forecast time
+
+```{r}
+#| label: fig-m4-retro-forecast
+#| fig-cap: "Model 4 posterior retrodictive: forecast time"
+
+util$plot_hist_quantiles(samples_m4, 'forecast_pred', 0, 800, 25,
+                         baseline_values = stan_data_m4$forecast,
+                         xlab = "Forecast time (minutes)")
+```
+
+### Resources distribution
+
+```{r}
+#| label: fig-m4-retro-resources
+#| fig-cap: "Model 4 posterior retrodictive: resources distribution (observed cases)"
+
+# Subset predictions to observed indices only
+resources_pred_obs <- samples_m4[paste0('resources_pred[', obs_resources_idx, ']')]
+names(resources_pred_obs) <- paste0('resources_pred_obs[', seq_along(obs_resources_idx), ']')
+
+util$plot_hist_quantiles(resources_pred_obs, 'resources_pred_obs', 0.5, 3.5, 1,
+                         baseline_values = stan_data_m4$resources,
+                         xlab = "Resources (1-3)")
+```
+
+### Treatment effect (percentage lift)
+
+```{r}
+#| label: fig-m4-retro-ate-pct
+#| fig-cap: "Model 4 posterior: treatment effect (% change)"
+
+y_ai <- dat$total_time[complete_idx & dat$ai_access == 1]
+y_no_ai <- dat$total_time[complete_idx & dat$ai_access == 0]
+observed_pct_diff <- (median(y_ai) / median(y_no_ai) - 1) * 100
+
+util$plot_line_hist(samples_m4$pct_lift, -80, 80, 5,
+                    xlab = "Treatment effect (% change)")
+abline(v = 0, lty = 1, lwd = 1)
+abline(v = observed_pct_diff, lty = 2, lwd = 2)
+```
+
+### Parameter summaries
+
+```{r}
+#| label: model4-summary
+
+print(fit_m4, pars = c("alpha_f", "alpha_t", "beta_burden", "beta_trt", "lambda_r",
+                        "sigma_b", "sigma_t", "kappa", "phi",
+                        "baseline_p", "cut_points", "pct_lift"))
+```
+
+### Prior vs Posterior: lambda_r
+
+```{r}
+#| label: fig-m4-prior-post-lambda-r
+#| fig-cap: "Model 4: Prior (teal) vs Posterior for lambda_r"
+
+util$plot_expectand_pushforward(samples_m4[["lambda_r"]], 25,
+                                display_name = "lambda_r", flim = c(-1, 3))
+xs <- seq(-1, 3, 0.01)
+ys <- dnorm(xs, 1, 0.43)
+lines(xs, ys, lwd = 2, col = c_light_teal)
+```
+
+### Prior vs Posterior: baseline probabilities
+
+```{r}
+#| label: fig-m4-prior-post-baseline-p
+#| fig-cap: "Model 4: Posterior baseline probabilities"
+
+par(mfrow = c(1, 3))
+for (k in 1:3) {
+  util$plot_expectand_pushforward(samples_m4[[paste0("baseline_p[", k, "]")]], 25,
+                                  display_name = paste0("baseline_p[", k, "]"),
+                                  flim = c(0, 1))
+  abline(v = 1/3, lty = 2, lwd = 2, col = c_light_teal)
+}
+```
+
+### Compare treatment effects across models
+
+```{r}
+#| label: fig-compare-ate-m4
+#| fig-cap: "Comparison: treatment effect estimates across all models"
+
+util$plot_line_hist(samples$pct_lift, -80, 80, 5,
+                    xlab = "Treatment effect (% change)", col = 'blue', prob = TRUE)
+util$plot_line_hist(samples_m2$pct_lift, -80, 80, 5, add = TRUE,
+                    col = 'darkgreen', prob = TRUE)
+util$plot_line_hist(samples_m3$pct_lift, -80, 80, 5, add = TRUE,
+                    col = 'darkorange', prob = TRUE)
+util$plot_line_hist(samples_m4$pct_lift, -80, 80, 5, add = TRUE,
+                    col = 'purple', prob = TRUE)
+legend("topright", c("Model 1", "Model 2", "Model 3", "Model 4"),
+       fill = c('blue', 'darkgreen', 'darkorange', 'purple'))
+```
+
+## Appendix: Investigating E-FMI in Model 4
+
+Low E-FMI indicates the sampler's momentum isn't helping explore efficiently. We diagnose this by examining the relationship between the hierarchical scale parameter (sigma_b) and the latent task_burden parameters.
+
+### Extract diagnostics
+
+```{r}
+#| label: m4-diagnostics-extract
+
+diagnostics_m4 <- util$extract_hmc_diagnostics(fit_m4)
+```
+
+### Visualizing the Funnel
+
+The characteristic funnel shape: when sigma_b is small, task_burden is constrained near zero; when sigma_b is large, task_burden spreads out.
+
+```{r}
+#| label: fig-m4-funnel
+#| fig-cap: "Model 4 funnel geometry: sigma_b vs selected task_burden parameters"
+#| fig-width: 10
+#| fig-height: 8
+
+util$plot_div_pairs(
+  x_names = c("sigma_b"),
+  y_names = c("task_burden[1]", "task_burden[10]", "task_burden[50]",
+              "task_burden[100]", "task_burden[150]", "task_burden[200]"),
+  expectand_vals_list = samples_m4,
+  diagnostics = diagnostics_m4,
+  transforms = list("sigma_b" = 1),
+  plot_mode = 0
+)
+```
+
+### Chain Mixing in Funnel Space
+
+Colors indicate iteration order (light = early, dark = late). Well-mixing chains show interspersed colors; poorly-mixing chains show gradients or clusters.
+
+```{r}
+#| label: fig-m4-pairs-chain
+#| fig-cap: "Model 4 pairs by chain: sigma_b vs task_burden[1]"
+#| fig-width: 10
+#| fig-height: 8
+
+util$plot_pairs_by_chain(
+  samples_m4[["sigma_b"]], "sigma_b",
+  samples_m4[["task_burden[1]"]], "task_burden[1]"
+)
+
+util$plot_pairs_by_chain(
+    samples_m4[["sigma_b"]], "sigma_b",
+    samples_m4[["beta_burden"]], "beta_burden"
+  )
+
+  util$plot_pairs_by_chain(
+    samples_m4[["sigma_b"]], "sigma_b",
+    samples_m4[["sigma_t"]], "sigma_t"
+  )
+
+  util$plot_pairs_by_chain(
+    samples_m4[["kappa"]], "kappa",
+    samples_m4[["alpha_f"]], "alpha_f"
+  )
+
+  util$plot_pairs_by_chain(
+    samples_m4[["sigma_b"]], "sigma_b",
+    samples_m4[["kappa"]], "kappa"
+  )
+```
+
+### Trajectory Lengths
+
+Unusual trajectory patterns indicate geometric problems. Very short trajectories suggest the sampler is U-turning quickly.
+
+```{r}
+#| label: fig-m4-leapfrogs
+#| fig-cap: "Model 4: Distribution of trajectory lengths by chain"
+
+util$plot_num_leapfrogs_by_chain(diagnostics_m4)
+```
+
+### Adapted Step Sizes
+
+Large variation between chains or very small step sizes indicate geometric problems.
+
+```{r}
+#| label: m4-stepsizes
+
+util$display_stepsizes(diagnostics_m4)
+```
+
+### Divergence Distribution
+
+```{r}
+#| label: fig-m4-div-sigma-b
+#| fig-cap: "Model 4: sigma_b distribution with divergences highlighted"
+
+divs <- diagnostics_m4[['divergent__']]
+div_idx <- which(c(t(divs)) == 1)
+nondiv_idx <- which(c(t(divs)) == 0)
+
+sigma_b_vals <- c(t(samples_m4[['sigma_b']]))
+
+util$plot_line_hist(sigma_b_vals[nondiv_idx], 0, 1.5, 0.05,
+                    xlab = "sigma_b", main = "sigma_b: non-divergent samples")
+if (length(div_idx) > 0) {
+  util$plot_line_hist(sigma_b_vals[div_idx], 0, 1.5, 0.05,
+                      col = "darkgreen", add = TRUE)
+  legend("topright", c("Non-divergent", "Divergent"),
+         fill = c("black", "darkgreen"))
+}
+```
+
+If divergences cluster at small sigma_b values, this confirms the funnel neck is problematic.
+
+### Investigating lambda_r Boundary Issue
+
+The posterior for lambda_r appears to want negative values but is constrained positive.
+
+```{r}
+#| label: fig-m4-lambda-r-posterior
+#| fig-cap: "Posterior of lambda_r (constrained positive)"
+
+util$plot_line_hist(samples_m4$lambda_r, 0, 3, 0.1,
+                    xlab = "lambda_r")
+abline(v = 0, lty = 2, lwd = 2, col = "red")
+```
+
+```{r}
+#| label: fig-m4-lambda-r-pairs
+#| fig-cap: "lambda_r vs other parameters"
+#| fig-width: 10
+#| fig-height: 8
+
+par(mfrow = c(2, 2))
+util$plot_pairs_by_chain(
+  samples_m4[["lambda_r"]], "lambda_r",
+  samples_m4[["sigma_b"]], "sigma_b"
+)
+```
+
+```{r}
+#| label: fig-m4-lambda-r-beta-burden
+#| fig-width: 10
+#| fig-height: 8
+
+util$plot_pairs_by_chain(
+  samples_m4[["lambda_r"]], "lambda_r",
+  samples_m4[["beta_burden"]], "beta_burden"
+)
+```
+
+### Raw Data Check: Task Burden vs Resources
+
+Do the inferred task burdens relate to observed resources as expected?
+
+```{r}
+#| label: fig-m4-burden-resources-check
+
+# Get posterior mean of task_burden for each observation
+task_burden_means <- sapply(1:stan_data_m4$N, function(n) {
+  mean(samples_m4[[paste0("task_burden[", n, "]")]])
+})
+
+# Plot task_burden vs observed resources (for observed cases)
+par(mfrow = c(1, 2))
+
+# Boxplot of task_burden by resource level
+boxplot(task_burden_means[obs_resources_idx] ~ stan_data_m4$resources,
+        xlab = "Resources (1-3)", ylab = "Posterior mean task_burden",
+        main = "Task burden by resource level")
+
+# Should see: higher resources → higher task_burden if lambda_r > 0 makes sense
+# If pattern is reversed, domain assumption may be wrong
+
+# Also check cutpoints
+cat("Posterior mean cut_points:\n")
+cat("  c1:", mean(samples_m4[["cut_points[1]"]]), "\n")
+cat("  c2:", mean(samples_m4[["cut_points[2]"]]), "\n")
+
+cat("\nPosterior mean baseline_p:\n")
+for (k in 1:3) {
+  cat("  p[", k, "]:", mean(samples_m4[[paste0("baseline_p[", k, "]")]]), "\n")
+}
+
+names <- paste0('task_burden[', stan_data_m4$resources_idx, ']')
+util$plot_conditional_mean_quantiles(samples_m4,names = names, obs_xs = stan_data_m4$resources, bin_min = 0.5, bin_max = 3.5, bin_delta=1 )
+```
+
+### Check: Is the Sign Convention Correct?
+
+In ordered logistic with Betancourt's convention: - `P(y <= k) = inv_logit(c_k - gamma)` - Positive gamma → probability mass shifts to HIGHER categories
+
+So if `gamma = lambda_r * task_burden`: - Higher task_burden with lambda_r \> 0 → higher gamma → higher resource category
+
+This is what we want. But if the data shows the opposite pattern, either: 1. Task burden is capturing something different than we think 2. Resources variable means something different 3. There's confounding we haven't modeled
+
+```{r}
+#| label: check-model-sign
+
+# Direct check: what's the empirical correlation between
+# inferred task_burden and resources?
+cor_burden_resources <- cor(task_burden_means[obs_resources_idx],
+                            stan_data_m4$resources)
+cat("Correlation(task_burden, resources):", round(cor_burden_resources, 3), "\n")
+
+# If this is NEGATIVE, task_burden is inversely related to resources,
+# which contradicts our domain assumption
+```
+
+# Model 5: Developer Comfort + Task Burden
+
+## Model Structure
+
+Model 5 extends Model 4 by adding a hierarchical developer-level latent variable (`comfort`) alongside the observation-level `task_burden`. This allows us to capture systematic between-developer differences.
+
+**Latent structure:**
+
+-   `comfort_j ~ Normal(0, sigma_c)` (developer-level, J developers)
+-   `task_burden_n ~ Normal(0, sigma_b)` (observation-level, N tasks)
+
+**Outcomes:**
+
+-   `exposure ~ OrderedLogistic(lambda_e * comfort, cut_points_e)` (K=5)
+-   `resources ~ OrderedLogistic(lambda_r_c * comfort + lambda_r_b * burden, cut_points_r)` (K=3)
+-   `forecast ~ NegBinomial2(exp(alpha_f - comfort + burden), phi)` (identification: coef = -1, +1)
+-   `y ~ Lognormal(alpha_t + beta_t_c * comfort + beta_burden * burden + beta_trt * ai, sigma_t)`
+
+**Identification:** Comfort coefficient fixed to -1 in forecast (higher comfort → lower forecast), task burden coefficient fixed to +1.
+
+## Prior Development
+
+### Parameters from M4 (unchanged)
+
+| Parameter   | Prior                 | Interpretation                 |
+|-------------|-----------------------|--------------------------------|
+| sigma_b     | HalfNormal(0, 0.39)   | Task burden spread             |
+| sigma_t     | HalfNormal(0, 0.25)   | Completion time noise          |
+| kappa       | HalfNormal(0, 0.10)   | Forecast overdispersion        |
+| alpha_f     | Normal(log(17), 0.30) | Log expected forecast baseline |
+| alpha_t     | Normal(log(90), 0.40) | Log median completion baseline |
+| beta_burden | Normal(1, 0.32)       | Burden → completion            |
+| beta_trt    | Normal(0, 0.7)        | Treatment effect               |
+| lambda_r_b  | Normal(1, 0.43)       | Burden → resources             |
+
+### New parameters for Model 5
+
+| Parameter  | Prior               | Interpretation                     |
+|------------|---------------------|------------------------------------|
+| sigma_c    | HalfNormal(0, 0.78) | Developer comfort spread; 99% \< 2 |
+| lambda_e   | Normal(1, 0.43)     | Comfort → exposure (+)             |
+| lambda_r_c | Normal(-1, 0.43)    | Comfort → resources (-)            |
+| beta_t_c   | Normal(-1, 0.6)     | Comfort → completion time (-)      |
+
+## Prior Predictive Check
+
+```{r}
+#| label: model5-prior-data
+
+# Build data for Model 5 prior predictive
+stan_data_m5_prior <- list(
+  N = nrow(dat),
+  J = length(unique(dat$dev_num)),
+  dev_idx = dat$dev_num,
+  ai_access = dat$ai_access,
+
+  # Dirichlet hyperparameters for exposure (K=5)
+  rho_e = rep(1/5, 5),
+  tau_e = 0.1,
+
+  # Dirichlet hyperparameters for resources (K=3)
+  rho_r = rep(1/3, 3),
+  tau_r = 0.2
+)
+
+cat("N observations:", stan_data_m5_prior$N, "\n")
+cat("J developers:", stan_data_m5_prior$J, "\n")
+```
+
+```{r}
+#| label: model5-prior-fit
+
+fit_prior_m5 <- stan(
+  file = "stan_programs/model5_prior.stan",
+  data = stan_data_m5_prior,
+  algorithm = "Fixed_param",
+  iter = 1000,
+  chains = 1,
+  seed = 5432
+)
+
+samples_prior_m5 <- util$extract_expectand_vals(fit_prior_m5)
+```
+
+### Prior on sigma_c (developer comfort spread)
+
+```{r}
+#| label: fig-m5-prior-sigma-c
+#| fig-cap: "Model 5 prior: sigma_c (developer comfort spread)"
+
+util$plot_line_hist(samples_prior_m5$sigma_c, 0, 2.5, 0.1,
+                    xlab = "sigma_c")
+abline(v = 2, lty = 2, col = "red")
+```
+
+### Prior on beta_t_c (comfort → completion time)
+
+```{r}
+#| label: fig-m5-prior-beta-t-c
+#| fig-cap: "Model 5 prior: beta_t_c (comfort effect on completion time)"
+
+util$plot_line_hist(samples_prior_m5$beta_t_c, -3, 1.5, 0.1,
+                    xlab = "beta_t_c")
+abline(v = 0, lty = 2, col = "gray")
+abline(v = -1, lty = 1, col = "gray")
+```
+
+### Prior on lambda_e (comfort → exposure)
+
+```{r}
+#| label: fig-m5-prior-lambda-e
+#| fig-cap: "Model 5 prior: lambda_e (comfort effect on exposure)"
+
+util$plot_line_hist(samples_prior_m5$lambda_e, -1, 3, 0.1,
+                    xlab = "lambda_e")
+abline(v = 0, lty = 2, col = "gray")
+abline(v = 1, lty = 1, col = "gray")
+```
+
+### Prior on lambda_r_c (comfort → resources)
+
+```{r}
+#| label: fig-m5-prior-lambda-r-c
+#| fig-cap: "Model 5 prior: lambda_r_c (comfort effect on resources)"
+
+util$plot_line_hist(samples_prior_m5$lambda_r_c, -3, 1, 0.1,
+                    xlab = "lambda_r_c")
+abline(v = 0, lty = 2, col = "gray")
+abline(v = -1, lty = 1, col = "gray")
+```
+
+### Prior on baseline probabilities: exposure (K=5)
+
+```{r}
+#| label: fig-m5-prior-baseline-probs-exposure
+#| fig-cap: "Model 5 prior: baseline exposure probabilities (at gamma = 0)"
+
+par(mfrow = c(2, 3))
+for (k in 1:5) {
+  util$plot_line_hist(samples_prior_m5[[paste0("baseline_p_e[", k, "]")]],
+                      0, 1, 0.05,
+                      xlab = paste0("P(E = ", k, ")"),
+                      main = paste0("Baseline P(E = ", k, ")"))
+  abline(v = 1/5, lty = 2, lwd = 2, col = "red")
+}
+```
+
+### Prior on baseline probabilities: resources (K=3)
+
+```{r}
+#| label: fig-m5-prior-baseline-probs-resources
+#| fig-cap: "Model 5 prior: baseline resources probabilities (at gamma = 0)"
+
+par(mfrow = c(1, 3))
+for (k in 1:3) {
+  util$plot_line_hist(samples_prior_m5[[paste0("baseline_p_r[", k, "]")]],
+                      0, 1, 0.05,
+                      xlab = paste0("P(R = ", k, ")"),
+                      main = paste0("Baseline P(R = ", k, ")"))
+  abline(v = 1/3, lty = 2, lwd = 2, col = "red")
+}
+```
+
+### Prior on cut points: exposure
+
+```{r}
+#| label: fig-m5-prior-cutpoints-exposure
+#| fig-cap: "Model 5 prior: exposure cut points"
+
+par(mfrow = c(2, 2))
+for (k in 1:4) {
+  util$plot_line_hist(samples_prior_m5[[paste0("cut_points_e[", k, "]")]],
+                      -4, 4, 0.2,
+                      xlab = paste0("c_e[", k, "]"),
+                      main = paste0("Cut point ", k))
+  abline(v = 0, lty = 2, lwd = 2)
+}
+```
+
+### Prior on cut points: resources
+
+```{r}
+#| label: fig-m5-prior-cutpoints-resources
+#| fig-cap: "Model 5 prior: resources cut points"
+
+par(mfrow = c(1, 2))
+util$plot_line_hist(samples_prior_m5[["cut_points_r[1]"]], -3, 3, 0.15,
+                    xlab = "c_r[1]", main = "Cut point 1")
+abline(v = 0, lty = 2, lwd = 2)
+
+util$plot_line_hist(samples_prior_m5[["cut_points_r[2]"]], -3, 3, 0.15,
+                    xlab = "c_r[2]", main = "Cut point 2")
+abline(v = 0, lty = 2, lwd = 2)
+```
+
+### Prior predictive: simulated exposure distribution
+
+```{r}
+#| label: fig-m5-prior-exposure
+#| fig-cap: "Model 5 prior predictive: exposure distribution"
+
+util$plot_hist_quantiles(samples_prior_m5, 'exposure_sim', 0.5, 5.5, 1,
+                         xlab = "Exposure (1-5)")
+```
+
+### Prior predictive: simulated resources distribution
+
+```{r}
+#| label: fig-m5-prior-resources
+#| fig-cap: "Model 5 prior predictive: resources distribution"
+
+util$plot_hist_quantiles(samples_prior_m5, 'resources_sim', 0.5, 3.5, 1,
+                         xlab = "Resources (1-3)")
+```
+
+### Prior predictive: simulated forecasts
+
+```{r}
+#| label: fig-m5-prior-forecast
+#| fig-cap: "Model 5 prior predictive: forecast times (minutes)"
+
+util$plot_hist_quantiles(samples_prior_m5, 'forecast_sim', 0, 800, 25,
+                         xlab = "Forecast time (minutes)")
+abline(v = 10, lty = 2, lwd = 2)
+abline(v = 1440, lty = 2, lwd = 2)
+```
+
+### Prior predictive: simulated completion times
+
+```{r}
+#| label: fig-m5-prior-y
+#| fig-cap: "Model 5 prior predictive: completion time (minutes)"
+
+util$plot_hist_quantiles(samples_prior_m5, 'y_sim', 0, 1500, 25,
+                         xlab = "Completion time (minutes)")
+abline(v = 10, lty = 2, lwd = 2)
+abline(v = 1440, lty = 2, lwd = 2)
+```
+
+### Prior predictive: log completion time
+
+```{r}
+#| label: fig-m5-prior-log-y
+#| fig-cap: "Model 5 prior predictive: log completion time"
+
+util$plot_hist_quantiles(samples_prior_m5, 'log_y_sim', 0, 10, 0.25,
+                         xlab = "log(completion time)")
+abline(v = log(10), lty = 2, lwd = 2)
+abline(v = log(1440), lty = 2, lwd = 2)
+```
+
+### Prior on treatment effect (percentage lift)
+
+```{r}
+#| label: fig-m5-prior-pct-lift
+#| fig-cap: "Model 5 prior: treatment effect (% change)"
+
+util$plot_line_hist(samples_prior_m5$pct_lift, -80, 200, 10,
+                    xlab = "% change in completion time")
+abline(v = 0, lty = 2, col = "gray")
+```
+
+### Summary statistics
+
+```{r}
+#| label: m5-prior-summary
+
+cat("Prior predictive summary:\n\n")
+
+cat("Mean exposure by draw:\n")
+print(my_q(samples_prior_m5$mean_exposure))
+
+cat("\nMean resources by draw:\n")
+print(my_q(samples_prior_m5$mean_resources))
+```
+
+## Model Fitting
+
+```{r}
+#| label: model5-fit-data
+
+# Use same complete cases as Model 4
+dat_complete_m5 <- dat[complete_idx, ]
+
+# Exposure (ordinal 1-5)
+exposure_raw <- dat_complete_m5$prior_task_exposure_1_to_5
+obs_exposure_idx <- which(!is.na(exposure_raw))
+
+# Resources (ordinal 1-3, recode 5 -> 3)
+resources_raw_m5 <- dat_complete_m5$external_resource_needs_1_to_3
+resources_raw_m5[resources_raw_m5 == 5] <- 3
+obs_resources_idx_m5 <- which(!is.na(resources_raw_m5))
+
+# Developer indices
+dev_idx_m5 <- dat_complete_m5$dev_num
+
+stan_data_m5 <- list(
+  N = sum(complete_idx),
+  J = length(unique(dev_idx_m5)),
+  dev_idx = dev_idx_m5,
+
+  y = dat_complete_m5$total_time,
+  forecast = dat_complete_m5$forecast,
+  ai_access = dat_complete_m5$ai_access,
+
+  # Exposure (with missingness)
+  N_obs_exposure = length(obs_exposure_idx),
+  exposure_idx = obs_exposure_idx,
+  exposure = exposure_raw[obs_exposure_idx],
+
+  # Resources (with missingness)
+  N_obs_resources = length(obs_resources_idx_m5),
+  resources_idx = obs_resources_idx_m5,
+  resources = resources_raw_m5[obs_resources_idx_m5],
+
+  # Dirichlet hyperparameters
+  rho_e = rep(1/5, 5),
+  tau_e = 0.1,
+  rho_r = rep(1/3, 3),
+  tau_r = 0.2
+)
+
+cat("N observations:", stan_data_m5$N, "\n")
+cat("J developers:", stan_data_m5$J, "\n")
+cat("N observed exposure:", stan_data_m5$N_obs_exposure, "\n")
+cat("N observed resources:", stan_data_m5$N_obs_resources, "\n")
+```
+
+```{r}
+#| label: model5-fit
+
+fit_m5 <- stan(
+  file = "stan_programs/model5.stan",
+  data = stan_data_m5,
+  chains = 4,
+  iter = 8000,
+  warmup = 4000,
+  seed = 54321,
+  control = list(adapt_delta = 0.99)
+)
+```
+
+```{r}
+#| label: model5-diagnostics
+
+util$check_all_hmc_diagnostics(util$extract_hmc_diagnostics(fit_m5))
+samples_m5 <- util$extract_expectand_vals(fit_m5)
+base_samples_m5 <- util$filter_expectands(samples_m5,
+  c('beta_trt', 'alpha_f', 'alpha_t', 'beta_burden', 'beta_t_c',
+    'lambda_e', 'lambda_r_c', 'lambda_r_b',
+    'sigma_c', 'sigma_b', 'sigma_t', 'kappa'))
+util$check_all_expectand_diagnostics(base_samples_m5)
+```
+
+## Posterior Retrodictive Checks
+
+### Log completion time
+
+```{r}
+#| label: fig-m5-retro-log-y
+#| fig-cap: "Model 5 posterior retrodictive: log completion time"
+
+util$plot_hist_quantiles(samples_m5, 'log_y_pred', 2, 8, 0.25,
+                         baseline_values = log(stan_data_m5$y),
+                         xlab = "log(completion time)")
+```
+
+### Forecast time
+
+```{r}
+#| label: fig-m5-retro-forecast
+#| fig-cap: "Model 5 posterior retrodictive: forecast time"
+
+util$plot_hist_quantiles(samples_m5, 'forecast_pred', 0, 800, 25,
+                         baseline_values = stan_data_m5$forecast,
+                         xlab = "Forecast time (minutes)", main='model 5')
+```
+
+### Exposure distribution
+
+```{r}
+#| label: fig-m5-retro-exposure
+#| fig-cap: "Model 5 posterior retrodictive: exposure distribution (observed cases)"
+
+exposure_pred_obs <- samples_m5[paste0('exposure_pred[', obs_exposure_idx, ']')]
+names(exposure_pred_obs) <- paste0('exposure_pred_obs[', seq_along(obs_exposure_idx), ']')
+
+util$plot_hist_quantiles(exposure_pred_obs, 'exposure_pred_obs', 0.5, 5.5, 1,
+                         baseline_values = stan_data_m5$exposure,
+                         xlab = "Exposure (1-5)")
+```
+
+### Resources distribution
+
+```{r}
+#| label: fig-m5-retro-resources
+#| fig-cap: "Model 5 posterior retrodictive: resources distribution (observed cases)"
+
+resources_pred_obs_m5 <- samples_m5[paste0('resources_pred[', obs_resources_idx_m5, ']')]
+names(resources_pred_obs_m5) <- paste0('resources_pred_obs[', seq_along(obs_resources_idx_m5), ']')
+
+util$plot_hist_quantiles(resources_pred_obs_m5, 'resources_pred_obs', 0.5, 3.5, 1,
+                         baseline_values = stan_data_m5$resources,
+                         xlab = "Resources (1-3)")
+```
+
+### Treatment effect (percentage lift)
+
+```{r}
+#| label: fig-m5-post-pct-lift
+#| fig-cap: "Model 5 posterior: treatment effect (% change)"
+
+util$plot_line_hist(samples_m5$pct_lift, -60, 60, 2.5,
+                    xlab = "% change in completion time")
+abline(v = 0, lty = 2, lwd = 2)
+
+cat("Treatment effect (% lift):\n")
+
+```
+
+### Parameter summaries
+
+```{r}
+#| label: m5-param-summary
+
+print(fit_m5, pars = c("sigma_c", "sigma_b", "sigma_t", "kappa",
+                        "alpha_f", "alpha_t",
+                        "beta_burden", "beta_trt", "beta_t_c",
+                        "lambda_e", "lambda_r_c", "lambda_r_b"))
+```
+
+### Prior vs Posterior: key parameters
+
+```{r}
+#| label: fig-m5-prior-post-sigma-c
+#| fig-cap: "Model 5: Prior (teal) vs Posterior for sigma_c"
+
+util$plot_expectand_pushforward(samples_m5[["sigma_c"]], 25,
+                                display_name = "sigma_c", flim = c(0, 2.5))
+xs <- seq(0, 2.5, 0.01)
+ys <- 2 * dnorm(xs, 0, 0.78)  # Half-Normal(0, 0.78)
+lines(xs, ys, lwd = 2, col = c_light_teal)
+```
+
+```{r}
+#| label: fig-m5-prior-post-beta-t-c
+#| fig-cap: "Model 5: Prior (teal) vs Posterior for beta_t_c"
+
+util$plot_expectand_pushforward(samples_m5[["beta_t_c"]], 25,
+                                display_name = "beta_t_c", flim = c(-3, 1.5))
+xs <- seq(-3, 1.5, 0.01)
+ys <- dnorm(xs, -1, 0.6)  # Normal(-1, 0.6)
+lines(xs, ys, lwd = 2, col = c_light_teal)
+abline(v = 0, lty = 2)
+```
+
+```{r}
+#| label: fig-m5-prior-post-lambda-e
+#| fig-cap: "Model 5: Prior (teal) vs Posterior for lambda_e"
+
+util$plot_expectand_pushforward(samples_m5[["lambda_e"]], 25,
+                                display_name = "lambda_e", flim = c(-1, 3))
+xs <- seq(-1, 3, 0.01)
+ys <- dnorm(xs, 1, 0.43)  # Normal(1, 0.43)
+lines(xs, ys, lwd = 2, col = c_light_teal)
+```
+
+```{r}
+#| label: fig-m5-prior-post-lambda-r-c
+#| fig-cap: "Model 5: Prior (teal) vs Posterior for lambda_r_c"
+
+util$plot_expectand_pushforward(samples_m5[["lambda_r_c"]], 25,
+                                display_name = "lambda_r_c", flim = c(-3, 1))
+xs <- seq(-3, 1, 0.01)
+ys <- dnorm(xs, -1, 0.43)  # Normal(-1, 0.43)
+lines(xs, ys, lwd = 2, col = c_light_teal)
+```
+
+```{r}
+#| label: fig-m5-prior-post-beta-burden
+#| fig-cap: "Model 5: Prior (teal) vs Posterior for beta_burden"
+
+util$plot_expectand_pushforward(samples_m5[["beta_burden"]], 25,
+                                display_name = "beta_burden", flim = c(0, 2.5))
+xs <- seq(0, 2.5, 0.01)
+ys <- dnorm(xs, 1, 0.32)  # Normal(1, 0.32)
+lines(xs, ys, lwd = 2, col = c_light_teal)
+```
+
+```{r}
+#| label: fig-m5-prior-post-kappa
+#| fig-cap: "Model 5: Prior (teal) vs Posterior for kappa"
+
+util$plot_expectand_pushforward(samples_m5[["kappa"]], 25,
+                                display_name = "kappa", flim = c(0, 0.5))
+xs <- seq(0, 0.5, 0.005)
+ys <- 2 * dnorm(xs, 0, 0.10)  # Half-Normal(0, 0.10)
+lines(xs, ys, lwd = 2, col = c_light_teal)
+```
+
+### Compare treatment effects across models
+
+```{r}
+#| label: fig-m5-compare-trt
+#| fig-cap: "Treatment effect comparison: Models 1-5"
+
+# util$plot_line_hist(samples_m1$pct_lift, -60, 60, 2.5,
+#                     xlab = "% change in completion time",
+#                     col = util$c_light)
+# util$plot_line_hist(samples_m2$pct_lift, -60, 60, 2.5,
+#                     col = util$c_mid, add = TRUE)
+# util$plot_line_hist(samples_m3$pct_lift, -60, 60, 2.5,
+#                     col = util$c_dark, add = TRUE)
+
+util$plot_line_hists(samples_m4$pct_lift, samples_m5$pct_lift, prob = T, col1 = util$c_light, col2=util$c_dark)
+
+abline(v = 0, lty = 2, lwd = 2)
+
+legend("topright", c("Model 4", "Model 5"),
+       fill = c(util$c_light, util$c_dark))
+```
+
+### Developer comfort estimates
+
+```{r}
+#| label: fig-m5-comfort-estimates
+#| fig-cap: "Model 5: Posterior developer comfort estimates"
+
+comfort_means <- sapply(1:stan_data_m5$J, function(j) {
+  mean(samples_m5[[paste0("comfort[", j, "]")]])
+})
+
+comfort_sds <- sapply(1:stan_data_m5$J, function(j) {
+  sd(samples_m5[[paste0("comfort[", j, "]")]])
+})
+
+# Order by mean comfort
+ord <- order(comfort_means)
+
+plot(1:stan_data_m5$J, comfort_means[ord], pch = 19,
+     xlab = "Developer (ordered by comfort)",
+     ylab = "Comfort",
+     ylim = range(comfort_means - 2*comfort_sds, comfort_means + 2*comfort_sds),
+     main = "Developer comfort estimates (±2 SD)")
+segments(1:stan_data_m5$J, comfort_means[ord] - 2*comfort_sds[ord],
+         1:stan_data_m5$J, comfort_means[ord] + 2*comfort_sds[ord])
+abline(h = 0, lty = 2)
+
+
+task_burden_means <- sapply(1:stan_data_m5$N, function(j) {
+  mean(samples_m5[[paste0("task_burden[", j, "]")]])
+})
+
+task_burden_sds <- sapply(1:stan_data_m5$N, function(j) {
+  sd(samples_m5[[paste0("task_burden[", j, "]")]])
+})
+
+# Order by mean comfort
+ord <- order(task_burden_means)
+
+plot(1:stan_data_m5$N, task_burden_means[ord], pch = 19,
+     xlab = "Task (Ordered by Burden)",
+     ylab = "Burden",
+     ylim = range(task_burden_means - 2*task_burden_sds, task_burden_means + 2*task_burden_sds),
+     main = "Task burden estimates (±2 SD)")
+segments(1:stan_data_m5$N, task_burden_means[ord] - 2*task_burden_sds[ord],
+         1:stan_data_m5$N, task_burden_means[ord] + 2*task_burden_sds[ord])
+abline(h = 0, lty = 2)
+```
+
+## Appendix: Investigating E-FMI in Model 5
+
+Low E-FMI indicates funnel-like geometry. Model 5 has two potential funnels: sigma_c (developer comfort) and sigma_b (task burden).
+
+### Extract diagnostics
+
+```{r}
+#| label: m5-diagnostics-extract
+
+diagnostics_m5 <- util$extract_hmc_diagnostics(fit_m5)
+```
+
+### Check sigma_c posterior
+
+Is the model learning anything about developer comfort, or is sigma_c collapsing to zero?
+
+```{r}
+#| label: fig-m5-sigma-c-posterior
+#| fig-cap: "Model 5: sigma_c posterior vs prior"
+
+util$plot_line_hist(samples_m5$sigma_c, 0, 2.5, 0.05,
+                    xlab = "sigma_c", main = "sigma_c posterior")
+abline(v = 0, lty = 2)
+
+cat("sigma_c summary:\n")
+
+```
+
+### Funnel: sigma_b vs task_burden
+
+```{r}
+#| label: fig-m5-funnel-sigma-b
+#| fig-cap: "Model 5 funnel: sigma_b vs task_burden"
+#| fig-width: 10
+#| fig-height: 8
+
+util$plot_div_pairs(
+  x_names = c("sigma_b"),
+  y_names = c("task_burden[1]", "task_burden[10]", "task_burden[50]",
+              "task_burden[100]", "task_burden[150]", "task_burden[200]"),
+  expectand_vals_list = samples_m5,
+  diagnostics = diagnostics_m5,
+  transforms = list("sigma_b" = 1),
+  plot_mode = 0
+)
+```
+
+### Funnel: sigma_c vs comfort
+
+```{r}
+#| label: fig-m5-funnel-sigma-c
+#| fig-cap: "Model 5 funnel: sigma_c vs comfort"
+#| fig-width: 10
+#| fig-height: 6
+
+util$plot_div_pairs(
+  x_names = c("sigma_c"),
+  y_names = paste0("comfort[", 1:min(stan_data_m5$J, 8), "]"),
+  expectand_vals_list = samples_m5,
+  diagnostics = diagnostics_m5,
+  transforms = list("sigma_c" = 1),
+  plot_mode = 0
+)
+```
+
+### Chain mixing: key parameter pairs
+
+```{r}
+#| label: fig-m5-pairs-chain
+#| fig-cap: "Model 5 pairs by chain"
+#| fig-width: 10
+#| fig-height: 8
+
+# sigma_b vs beta_burden (problematic in diagnostics)
+util$plot_pairs_by_chain(
+  samples_m5[["sigma_b"]], "sigma_b",
+  samples_m5[["beta_burden"]], "beta_burden"
+)
+
+# sigma_b vs sigma_t
+util$plot_pairs_by_chain(
+  samples_m5[["sigma_b"]], "sigma_b",
+  samples_m5[["sigma_t"]], "sigma_t"
+)
+
+# sigma_c vs sigma_b (interaction between two funnels?)
+util$plot_pairs_by_chain(
+  samples_m5[["sigma_c"]], "sigma_c",
+  samples_m5[["sigma_b"]], "sigma_b"
+)
+
+# sigma_c vs beta_t_c
+util$plot_pairs_by_chain(
+  samples_m5[["sigma_c"]], "sigma_c",
+  samples_m5[["beta_t_c"]], "beta_t_c"
+)
+
+# kappa vs alpha_f
+util$plot_pairs_by_chain(
+  samples_m5[["kappa"]], "kappa",
+  samples_m5[["alpha_f"]], "alpha_f"
+)
+```
+
+### Trajectory lengths
+
+```{r}
+#| label: fig-m5-leapfrogs
+#| fig-cap: "Model 5: Distribution of trajectory lengths by chain"
+
+util$plot_num_leapfrogs_by_chain(diagnostics_m5)
+```
+
+### Adapted step sizes
+
+```{r}
+#| label: m5-step-sizes
+
+cat("Adapted step sizes by chain:\n")
+for (c in 1:4) {
+  cat("  Chain", c, ":", diagnostics_m5$stepsize__[c,], "\n")
+}
 ```

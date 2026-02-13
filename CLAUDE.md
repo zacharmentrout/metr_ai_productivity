@@ -27,6 +27,8 @@ When specifying priors, reason about extremity thresholds (values beyond which t
 
 Example: If β > 3 is implausible, use Normal(0, 3/2.32) = Normal(0, 1.29).
 
+**Do not change priors without asking.** Prior choices are collaborative decisions. When modifying constraints or fixing issues, keep priors the same unless explicitly discussed with the user.
+
 As we build out the `analysis.qmd` file, ensure that it is structured such that we can step through several iterations of model development. We want to narrate what we're doing as we're doing it.
 
 ## Critical Note: Iterative Model Building
