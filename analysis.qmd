@@ -1104,15 +1104,15 @@ If divergences cluster at small σ_b values, this confirms the funnel geometry p
 
 We extend Model 3 to include the ordinal resources variable. Task burden now generates three outcomes: forecasts, resources, and completion times.
 
-$$\text{task\_burden}_n \sim \text{Normal}(0, \sigma_b)$$
+$$\text{task_burden}_n \sim \text{Normal}(0, \sigma_b)$$
 
-**Forecasts** (as in M3): $$\text{forecast}_n = 5 \cdot (Z_n + 1), \quad Z_n \sim \text{NegBinomial2}(\exp(\alpha_f + \text{task\_burden}_n), \phi)$$
+**Forecasts** (as in M3): $$\text{forecast}_n = 5 \cdot (Z_n + 1), \quad Z_n \sim \text{NegBinomial2}(\exp(\alpha_f + \text{task_burden}_n), \phi)$$
 
-**Resources** (ordinal 1-3): $$\text{resources}_n \sim \text{OrderedLogistic}(\lambda_r \cdot \text{task\_burden}_n, \mathbf{c})$$
+**Resources** (ordinal 1-3): $$\text{resources}_n \sim \text{OrderedLogistic}(\lambda_r \cdot \text{task_burden}_n, \mathbf{c})$$
 
 where cutpoints $\mathbf{c}$ are derived from a Dirichlet prior on baseline probabilities: $$\mathbf{p} \sim \text{Dirichlet}(\boldsymbol{\alpha}), \quad \boldsymbol{\alpha} = \boldsymbol{\rho}/\tau + \mathbf{1}$$ $$c_1 = \text{logit}(p_1), \quad c_2 = \text{logit}(p_1 + p_2)$$
 
-**Completion time**: $$y_n \sim \text{Lognormal}(\alpha_t + \beta_{\text{trt}} \cdot \text{ai\_access}_n + \beta_{\text{burden}} \cdot \text{task\_burden}_n, \sigma_t)$$
+**Completion time**: $$y_n \sim \text{Lognormal}(\alpha_t + \beta_{\text{trt}} \cdot \text{ai_access}_n + \beta_{\text{burden}} \cdot \text{task_burden}_n, \sigma_t)$$
 
 ## Prior Development
 
@@ -1664,39 +1664,33 @@ Model 5 extends Model 4 by adding a hierarchical developer-level latent variable
 
 -   `comfort_j ~ Normal(0, sigma_c)` (developer-level, J developers)
 -   `task_burden_n ~ Normal(0, sigma_b)` (observation-level, N tasks)
+-   `gap_n = task_burden_n - comfort_j` (key derived quantity)
 
 **Outcomes:**
 
 -   `exposure ~ OrderedLogistic(lambda_e * comfort, cut_points_e)` (K=5)
--   `resources ~ OrderedLogistic(lambda_r_c * comfort + lambda_r_b * burden, cut_points_r)` (K=3)
--   `forecast ~ NegBinomial2(exp(alpha_f - comfort + burden), phi)` (identification: coef = -1, +1)
--   `y ~ Lognormal(alpha_t + beta_t_c * comfort + beta_burden * burden + beta_trt * ai, sigma_t)`
+-   `resources ~ OrderedLogistic(lambda_r * gap, cut_points_r)` (K=3)
+-   `forecast ~ NegBinomial2(exp(alpha_f + gap), phi)` (identification: gap coef = 1)
+-   `y ~ Lognormal(alpha_t + beta_gap * gap + beta_trt * ai, sigma_t)`
 
-**Identification:** Comfort coefficient fixed to -1 in forecast (higher comfort → lower forecast), task burden coefficient fixed to +1.
+**Identification:** Gap coefficient fixed to 1 in forecast (identifies latent scale).
 
 ## Prior Development
 
-### Parameters from M4 (unchanged)
+### Model 5 Parameters
 
-| Parameter   | Prior                 | Interpretation                 |
-|-------------|-----------------------|--------------------------------|
-| sigma_b     | HalfNormal(0, 0.39)   | Task burden spread             |
-| sigma_t     | HalfNormal(0, 0.25)   | Completion time noise          |
-| kappa       | HalfNormal(0, 0.10)   | Forecast overdispersion        |
-| alpha_f     | Normal(log(17), 0.30) | Log expected forecast baseline |
-| alpha_t     | Normal(log(90), 0.40) | Log median completion baseline |
-| beta_burden | Normal(1, 0.32)       | Burden → completion            |
-| beta_trt    | Normal(0, 0.7)        | Treatment effect               |
-| lambda_r_b  | Normal(1, 0.43)       | Burden → resources             |
-
-### New parameters for Model 5
-
-| Parameter  | Prior               | Interpretation                     |
-|------------|---------------------|------------------------------------|
-| sigma_c    | HalfNormal(0, 0.78) | Developer comfort spread; 99% \< 2 |
-| lambda_e   | Normal(1, 0.43)     | Comfort → exposure (+)             |
-| lambda_r_c | Normal(-1, 0.43)    | Comfort → resources (-)            |
-| beta_t_c   | Normal(-1, 0.6)     | Comfort → completion time (-)      |
+| Parameter | Prior                 | Interpretation                 |
+|-----------|-----------------------|--------------------------------|
+| sigma_c   | HalfNormal(0, 0.78)   | Developer comfort spread       |
+| sigma_b   | HalfNormal(0, 0.39)   | Task burden spread             |
+| sigma_t   | HalfNormal(0, 0.25)   | Completion time noise          |
+| kappa     | HalfNormal(0, 0.10)   | Forecast overdispersion        |
+| alpha_f   | Normal(log(17), 0.30) | Log expected forecast baseline |
+| alpha_t   | Normal(log(90), 0.40) | Log median completion baseline |
+| beta_gap  | Normal(1, 0.3)        | Gap → completion (calibration) |
+| beta_trt  | Normal(0, 0.7)        | Treatment effect               |
+| lambda_e  | Normal(1, 0.43)       | Comfort → exposure (+)         |
+| lambda_r  | Normal(1, 0.43)       | Gap → resources (+)            |
 
 ## Prior Predictive Check
 
@@ -1749,16 +1743,16 @@ util$plot_line_hist(samples_prior_m5$sigma_c, 0, 2.5, 0.1,
 abline(v = 2, lty = 2, col = "red")
 ```
 
-### Prior on beta_t_c (comfort → completion time)
+### Prior on beta_gap (gap → completion time)
 
 ```{r}
-#| label: fig-m5-prior-beta-t-c
-#| fig-cap: "Model 5 prior: beta_t_c (comfort effect on completion time)"
+#| label: fig-m5-prior-beta-gap
+#| fig-cap: "Model 5 prior: beta_gap (gap effect on completion time)"
 
-util$plot_line_hist(samples_prior_m5$beta_t_c, -3, 1.5, 0.1,
-                    xlab = "beta_t_c")
+util$plot_line_hist(samples_prior_m5$beta_gap, -0.5, 2.5, 0.1,
+                    xlab = "beta_gap")
 abline(v = 0, lty = 2, col = "gray")
-abline(v = -1, lty = 1, col = "gray")
+abline(v = 1, lty = 1, col = "gray")
 ```
 
 ### Prior on lambda_e (comfort → exposure)
@@ -1773,16 +1767,16 @@ abline(v = 0, lty = 2, col = "gray")
 abline(v = 1, lty = 1, col = "gray")
 ```
 
-### Prior on lambda_r_c (comfort → resources)
+### Prior on lambda_r (gap → resources)
 
 ```{r}
-#| label: fig-m5-prior-lambda-r-c
-#| fig-cap: "Model 5 prior: lambda_r_c (comfort effect on resources)"
+#| label: fig-m5-prior-lambda-r
+#| fig-cap: "Model 5 prior: lambda_r (gap effect on resources)"
 
-util$plot_line_hist(samples_prior_m5$lambda_r_c, -3, 1, 0.1,
-                    xlab = "lambda_r_c")
+util$plot_line_hist(samples_prior_m5$lambda_r, -1, 3, 0.1,
+                    xlab = "lambda_r")
 abline(v = 0, lty = 2, col = "gray")
-abline(v = -1, lty = 1, col = "gray")
+abline(v = 1, lty = 1, col = "gray")
 ```
 
 ### Prior on baseline probabilities: exposure (K=5)
@@ -1879,6 +1873,7 @@ util$plot_hist_quantiles(samples_prior_m5, 'forecast_sim', 0, 800, 25,
                          xlab = "Forecast time (minutes)")
 abline(v = 10, lty = 2, lwd = 2)
 abline(v = 1440, lty = 2, lwd = 2)
+util$my_q(samples_prior_m5[['forecast_sim[1]']])
 ```
 
 ### Prior predictive: simulated completion times
@@ -1903,6 +1898,7 @@ util$plot_hist_quantiles(samples_prior_m5, 'log_y_sim', 0, 10, 0.25,
                          xlab = "log(completion time)")
 abline(v = log(10), lty = 2, lwd = 2)
 abline(v = log(1440), lty = 2, lwd = 2)
+util$my_q(samples_prior_m5[['y_sim[1]']])
 ```
 
 ### Prior on treatment effect (percentage lift)
@@ -1914,6 +1910,7 @@ abline(v = log(1440), lty = 2, lwd = 2)
 util$plot_line_hist(samples_prior_m5$pct_lift, -80, 200, 10,
                     xlab = "% change in completion time")
 abline(v = 0, lty = 2, col = "gray")
+util$my_q(samples_prior_m5$pct_lift)
 ```
 
 ### Summary statistics
@@ -1924,10 +1921,10 @@ abline(v = 0, lty = 2, col = "gray")
 cat("Prior predictive summary:\n\n")
 
 cat("Mean exposure by draw:\n")
-print(my_q(samples_prior_m5$mean_exposure))
+print(util$my_q(samples_prior_m5$mean_exposure))
 
 cat("\nMean resources by draw:\n")
-print(my_q(samples_prior_m5$mean_resources))
+print(util$my_q(samples_prior_m5$mean_resources))
 ```
 
 ## Model Fitting
@@ -2002,8 +1999,8 @@ fit_m5 <- stan(
 util$check_all_hmc_diagnostics(util$extract_hmc_diagnostics(fit_m5))
 samples_m5 <- util$extract_expectand_vals(fit_m5)
 base_samples_m5 <- util$filter_expectands(samples_m5,
-  c('beta_trt', 'alpha_f', 'alpha_t', 'beta_burden', 'beta_t_c',
-    'lambda_e', 'lambda_r_c', 'lambda_r_b',
+  c('beta_gap', 'beta_trt', 'alpha_f', 'alpha_t',
+    'lambda_e', 'lambda_r',
     'sigma_c', 'sigma_b', 'sigma_t', 'kappa'))
 util$check_all_expectand_diagnostics(base_samples_m5)
 ```
@@ -2071,7 +2068,7 @@ util$plot_line_hist(samples_m5$pct_lift, -60, 60, 2.5,
 abline(v = 0, lty = 2, lwd = 2)
 
 cat("Treatment effect (% lift):\n")
-
+util$my_q(samples_m5$pct_lift)
 ```
 
 ### Parameter summaries
@@ -2081,8 +2078,8 @@ cat("Treatment effect (% lift):\n")
 
 print(fit_m5, pars = c("sigma_c", "sigma_b", "sigma_t", "kappa",
                         "alpha_f", "alpha_t",
-                        "beta_burden", "beta_trt", "beta_t_c",
-                        "lambda_e", "lambda_r_c", "lambda_r_b"))
+                        "beta_gap", "beta_trt",
+                        "lambda_e", "lambda_r"))
 ```
 
 ### Prior vs Posterior: key parameters
@@ -2099,15 +2096,15 @@ lines(xs, ys, lwd = 2, col = c_light_teal)
 ```
 
 ```{r}
-#| label: fig-m5-prior-post-beta-t-c
-#| fig-cap: "Model 5: Prior (teal) vs Posterior for beta_t_c"
+#| label: fig-m5-prior-post-beta-gap
+#| fig-cap: "Model 5: Prior (teal) vs Posterior for beta_gap"
 
-util$plot_expectand_pushforward(samples_m5[["beta_t_c"]], 25,
-                                display_name = "beta_t_c", flim = c(-3, 1.5))
-xs <- seq(-3, 1.5, 0.01)
-ys <- dnorm(xs, -1, 0.6)  # Normal(-1, 0.6)
+util$plot_expectand_pushforward(samples_m5[["beta_gap"]], 25,
+                                display_name = "beta_gap", flim = c(-0.5, 2.5))
+xs <- seq(-0.5, 2.5, 0.01)
+ys <- dnorm(xs, 1, 0.3)  # Normal(1, 0.3)
 lines(xs, ys, lwd = 2, col = c_light_teal)
-abline(v = 0, lty = 2)
+abline(v = 1, lty = 2)
 ```
 
 ```{r}
@@ -2122,24 +2119,13 @@ lines(xs, ys, lwd = 2, col = c_light_teal)
 ```
 
 ```{r}
-#| label: fig-m5-prior-post-lambda-r-c
-#| fig-cap: "Model 5: Prior (teal) vs Posterior for lambda_r_c"
+#| label: fig-m5-prior-post-lambda-r
+#| fig-cap: "Model 5: Prior (teal) vs Posterior for lambda_r"
 
-util$plot_expectand_pushforward(samples_m5[["lambda_r_c"]], 25,
-                                display_name = "lambda_r_c", flim = c(-3, 1))
-xs <- seq(-3, 1, 0.01)
-ys <- dnorm(xs, -1, 0.43)  # Normal(-1, 0.43)
-lines(xs, ys, lwd = 2, col = c_light_teal)
-```
-
-```{r}
-#| label: fig-m5-prior-post-beta-burden
-#| fig-cap: "Model 5: Prior (teal) vs Posterior for beta_burden"
-
-util$plot_expectand_pushforward(samples_m5[["beta_burden"]], 25,
-                                display_name = "beta_burden", flim = c(0, 2.5))
-xs <- seq(0, 2.5, 0.01)
-ys <- dnorm(xs, 1, 0.32)  # Normal(1, 0.32)
+util$plot_expectand_pushforward(samples_m5[["lambda_r"]], 25,
+                                display_name = "lambda_r", flim = c(-1, 3))
+xs <- seq(-1, 3, 0.01)
+ys <- dnorm(xs, 1, 0.43)  # Normal(1, 0.43)
 lines(xs, ys, lwd = 2, col = c_light_teal)
 ```
 
@@ -2297,10 +2283,10 @@ util$plot_div_pairs(
 #| fig-width: 10
 #| fig-height: 8
 
-# sigma_b vs beta_burden (problematic in diagnostics)
+# sigma_b vs beta_gap
 util$plot_pairs_by_chain(
   samples_m5[["sigma_b"]], "sigma_b",
-  samples_m5[["beta_burden"]], "beta_burden"
+  samples_m5[["beta_gap"]], "beta_gap"
 )
 
 # sigma_b vs sigma_t
@@ -2315,10 +2301,10 @@ util$plot_pairs_by_chain(
   samples_m5[["sigma_b"]], "sigma_b"
 )
 
-# sigma_c vs beta_t_c
+# sigma_c vs beta_gap
 util$plot_pairs_by_chain(
   samples_m5[["sigma_c"]], "sigma_c",
-  samples_m5[["beta_t_c"]], "beta_t_c"
+  samples_m5[["beta_gap"]], "beta_gap"
 )
 
 # kappa vs alpha_f
@@ -2346,4 +2332,882 @@ cat("Adapted step sizes by chain:\n")
 for (c in 1:4) {
   cat("  Chain", c, ":", diagnostics_m5$stepsize__[c,], "\n")
 }
+```
+
+# Model 6: Heterogeneous Treatment Effect (Gap Interaction)
+
+## Model Structure
+
+Model 6 extends Model 5 by allowing the treatment effect to vary with gap. The key question: does AI help more (or less) for harder tasks?
+
+**Latent structure (same as Model 5):**
+
+-   `comfort_j ~ Normal(0, sigma_c)` (developer-level)
+-   `task_burden_n ~ Normal(0, sigma_b)` (observation-level)
+-   `gap_n = task_burden_n - comfort_j` (key derived quantity)
+
+**Heterogeneous treatment effect:**
+
+$$\mu_t = \alpha_t + \beta_{\text{gap}} \cdot \text{gap} + \beta_{\text{trt}} \cdot \text{ai} + \beta_{\text{gap_trt}} \cdot \text{gap} \cdot \text{ai}$$
+
+The treatment effect is: $\beta_{\text{trt}} + \beta_{\text{gap_trt}} \cdot \text{gap}$
+
+-   $\beta_{\text{trt}}$: treatment effect at gap = 0 (average task for average developer)
+-   $\beta_{\text{gap_trt}}$: how effect changes per unit gap
+    -   $> 0$: AI helps less (or hurts more) for harder tasks
+    -   $< 0$: AI helps more for harder tasks
+
+**Other outcomes (same as Model 5):**
+
+-   `exposure ~ OrderedLogistic(lambda_e * comfort, cut_points_e)`
+-   `resources ~ OrderedLogistic(lambda_r * gap, cut_points_r)`
+-   `forecast ~ NegBinomial2(exp(alpha_f + gap), phi)`
+
+## Prior Development
+
+### Parameters for Model 6
+
+| Parameter    | Prior                 | Interpretation                 |
+|--------------|-----------------------|--------------------------------|
+| sigma_c      | HalfNormal(0, 0.78)   | Developer comfort spread       |
+| sigma_b      | HalfNormal(0, 0.39)   | Task burden spread             |
+| sigma_t      | HalfNormal(0, 0.25)   | Completion time noise          |
+| kappa        | HalfNormal(0, 0.10)   | Forecast overdispersion        |
+| alpha_f      | Normal(log(17), 0.30) | Log expected forecast baseline |
+| alpha_t      | Normal(log(90), 0.40) | Log median completion baseline |
+| beta_gap     | Normal(1, 0.3)        | Gap → completion               |
+| beta_trt     | Normal(0, 0.7)        | Treatment effect (at gap = 0)  |
+| beta_gap_trt | Normal(0, 0.15)       | Gap × treatment interaction    |
+| lambda_e     | Normal(1, 0.43)       | Comfort → exposure (+)         |
+| lambda_r     | Normal(1, 0.43)       | Gap → resources (+)            |
+
+**Prior calibration for beta_gap_trt:** Comparing a hard task (gap = +1) to an easy task (gap = -1), we would be shocked if the AI treatment effect differed by more than 80 percentage points. This corresponds to Normal(0, 0.15).
+
+## Prior Predictive Check
+
+```{r}
+#| label: model6-prior-data
+
+stan_data_m6_prior <- list(
+  N = nrow(dat),
+  J = length(unique(dat$dev_num)),
+  dev_idx = dat$dev_num,
+  ai_access = dat$ai_access,
+
+  # Dirichlet hyperparameters (same as M5)
+  rho_e = rep(1/5, 5),
+  tau_e = 0.1,
+  rho_r = rep(1/3, 3),
+  tau_r = 0.2
+)
+
+cat("N observations:", stan_data_m6_prior$N, "\n")
+cat("J developers:", stan_data_m6_prior$J, "\n")
+```
+
+```{r}
+#| label: model6-prior-fit
+
+fit_prior_m6 <- stan(
+  file = "stan_programs/model6_prior.stan",
+  data = stan_data_m6_prior,
+  algorithm = "Fixed_param",
+  iter = 1000,
+  chains = 1,
+  seed = 6543
+)
+
+samples_prior_m6 <- util$extract_expectand_vals(fit_prior_m6)
+```
+
+### Prior on beta_gap_trt (interaction term)
+
+```{r}
+#| label: fig-m6-prior-beta-gap-trt
+#| fig-cap: "Model 6 prior: beta_gap_trt (gap x treatment interaction)"
+
+util$plot_line_hist(samples_prior_m6$beta_gap_trt, -0.6, 0.6, 0.025,
+                    xlab = "beta_gap_trt")
+abline(v = 0, lty = 2, lwd = 2)
+```
+
+### Prior predictive: treatment effect heterogeneity
+
+```{r}
+#| label: fig-m6-prior-het-trt
+#| fig-cap: "Model 6 prior predictive: treatment effect at different gap values"
+
+par(mfrow = c(1, 3))
+
+util$plot_line_hist(samples_prior_m6$pct_lift_low_gap, -100, 100, 5,
+                    xlab = "% lift (easy task, gap = -1)")
+abline(v = 0, lty = 2, lwd = 2)
+
+util$plot_line_hist(samples_prior_m6$pct_lift, -100, 100, 5,
+                    xlab = "% lift (avg task, gap = 0)")
+abline(v = 0, lty = 2, lwd = 2)
+
+util$plot_line_hist(samples_prior_m6$pct_lift_high_gap, -100, 100, 5,
+                    xlab = "% lift (hard task, gap = +1)")
+abline(v = 0, lty = 2, lwd = 2)
+```
+
+### Prior predictive: simulated completion times
+
+```{r}
+#| label: fig-m6-prior-y
+#| fig-cap: "Model 6 prior predictive: completion time (minutes)"
+
+util$plot_hist_quantiles(samples_prior_m6, 'y_sim', 0, 1500, 25,
+                         xlab = "Completion time (minutes)")
+```
+
+### Prior predictive: log completion time
+
+```{r}
+#| label: fig-m6-prior-log-y
+#| fig-cap: "Model 6 prior predictive: log completion time"
+
+util$plot_hist_quantiles(samples_prior_m6, 'log_y_sim', 0, 10, 0.25,
+                         xlab = "log(completion time)")
+util$my_q(samples_prior_m6$`y_sim[100]`)
+```
+
+### Summary statistics
+
+```{r}
+#| label: m6-prior-summary
+
+cat("Prior predictive summary:\n\n")
+
+cat("beta_gap_trt (interaction):\n")
+print(util$my_q(samples_prior_m6$beta_gap_trt))
+
+cat("\nTreatment effect at gap = -1 (easy task):\n")
+print(util$my_q(samples_prior_m6$pct_lift_low_gap))
+
+cat("\nTreatment effect at gap = 0 (average task):\n")
+print(util$my_q(samples_prior_m6$pct_lift))
+
+cat("\nTreatment effect at gap = +1 (hard task):\n")
+print(util$my_q(samples_prior_m6$pct_lift_high_gap))
+
+cat("\nGap distribution (SD):\n")
+print(util$my_q(samples_prior_m6$sd_gap))
+```
+
+## Model Fitting
+
+```{r}
+#| label: model6-fit-data
+
+# Same data structure as Model 5
+stan_data_m6 <- stan_data_m5
+
+cat("N observations:", stan_data_m6$N, "\n")
+cat("J developers:", stan_data_m6$J, "\n")
+```
+
+```{r}
+#| label: model6-fit
+
+fit_m6 <- stan(
+  file = "stan_programs/model6.stan",
+  data = stan_data_m6,
+  chains = 4,
+  iter = 4000,
+  warmup = 2000,
+  seed = 65432,
+  control = list(adapt_delta = 0.8, max_treedepth = 10)
+)
+```
+
+```{r}
+#| label: model6-diagnostics
+
+util$check_all_hmc_diagnostics(util$extract_hmc_diagnostics(fit_m6))
+samples_m6 <- util$extract_expectand_vals(fit_m6)
+base_samples_m6 <- util$filter_expectands(samples_m6,
+  c('beta_gap', 'beta_trt', 'beta_gap_trt', 'alpha_f', 'alpha_t',
+    'lambda_e', 'lambda_r',
+    'sigma_c', 'sigma_b', 'sigma_t', 'kappa'))
+util$check_all_expectand_diagnostics(base_samples_m6)
+```
+
+## Posterior Retrodictive Checks
+
+### Log completion time
+
+```{r}
+#| label: fig-m6-retro-log-y
+#| fig-cap: "Model 6 posterior retrodictive: log completion time"
+
+util$plot_hist_quantiles(samples_m6, 'log_y_pred', 2, 8, 0.25,
+                         baseline_values = log(stan_data_m6$y),
+                         xlab = "log(completion time)")
+```
+
+### Forecast posterior predictive
+
+```{r}
+#| label: fig-m6-retro-forecast
+#| fig-cap: "Model 6 posterior retrodictive: forecast time"
+
+util$plot_hist_quantiles(samples_m6, 'forecast_pred', 0, 500, 25,
+                         baseline_values = stan_data_m6$forecast,
+                         xlab = "Forecast time (minutes)")
+```
+
+### Exposure distribution
+
+```{r}
+#| label: fig-m6-retro-exposure
+#| fig-cap: "Model 6 posterior retrodictive: exposure distribution (observed cases)"
+
+exposure_pred_obs_m6 <- samples_m6[paste0('exposure_pred[', obs_exposure_idx, ']')]
+names(exposure_pred_obs_m6) <- paste0('exposure_pred_obs[', seq_along(obs_exposure_idx), ']')
+
+util$plot_hist_quantiles(exposure_pred_obs_m6, 'exposure_pred_obs', 0.5, 5.5, 1,
+                         baseline_values = stan_data_m6$exposure,
+                         xlab = "Exposure (1-5)")
+```
+
+### Resources distribution
+
+```{r}
+#| label: fig-m6-retro-resources
+#| fig-cap: "Model 6 posterior retrodictive: resources distribution (observed cases)"
+
+resources_pred_obs_m6 <- samples_m6[paste0('resources_pred[', obs_resources_idx_m5, ']')]
+names(resources_pred_obs_m6) <- paste0('resources_pred_obs[', seq_along(obs_resources_idx_m5), ']')
+
+util$plot_hist_quantiles(resources_pred_obs_m6, 'resources_pred_obs', 0.5, 3.5, 1,
+                         baseline_values = stan_data_m6$resources,
+                         xlab = "Resources (1-3)")
+```
+
+## Posterior: Heterogeneous Treatment Effect
+
+### Treatment effect at gap = 0 (average task)
+
+```{r}
+#| label: fig-m6-post-pct-lift
+#| fig-cap: "Model 6 posterior: treatment effect at gap = 0 (% change)"
+
+util$plot_line_hist(samples_m6$pct_lift, -60, 60, 2.5,
+                    xlab = "% change in completion time (gap = 0)")
+abline(v = 0, lty = 2, lwd = 2)
+
+cat("Treatment effect at gap = 0 (% lift):\n")
+print(util$my_q(samples_m6$pct_lift))
+```
+
+### Interaction term (beta_gap_trt)
+
+```{r}
+#| label: fig-m6-post-beta-gap-trt
+#| fig-cap: "Model 6 posterior: beta_gap_trt (gap x treatment interaction)"
+
+util$plot_expectand_pushforward(samples_m6[["beta_gap_trt"]], 25,
+                                display_name = "beta_gap_trt", flim = c(-0.6, 0.6))
+abline(v = 0, lty = 2, lwd = 2)
+
+cat("beta_gap_trt (interaction):\n")
+print(util$my_q(samples_m6$beta_gap_trt))
+```
+
+### Treatment effect across gap values
+
+```{r}
+#| label: fig-m6-post-het-trt
+#| fig-cap: "Model 6 posterior: treatment effect at different gap values"
+
+par(mfrow = c(1,1))
+
+util$plot_line_hist(samples_m6$pct_lift_low_gap, -80, 80, 4,
+                    xlab = "% lift (easy task, gap = -1)")
+abline(v = 0, lty = 2, lwd = 2)
+
+util$plot_line_hist(samples_m6$pct_lift, -80, 80, 4,
+                    xlab = "% lift (avg task, gap = 0)")
+abline(v = 0, lty = 2, lwd = 2)
+
+util$plot_line_hist(samples_m6$pct_lift_high_gap, -80, 80, 4,
+                    xlab = "% lift (hard task, gap = +1)")
+abline(v = 0, lty = 2, lwd = 2)
+```
+
+```{r}
+#| label: m6-het-trt-summary
+
+cat("Treatment effect heterogeneity:\n\n")
+
+cat("Easy task (gap = -1):\n")
+print(util$my_q(samples_m6$pct_lift_low_gap))
+
+cat("\nAverage task (gap = 0):\n")
+print(util$my_q(samples_m6$pct_lift))
+
+cat("\nHard task (gap = +1):\n")
+print(util$my_q(samples_m6$pct_lift_high_gap))
+
+cat("\nDifference (hard - easy):\n")
+print(util$my_q(samples_m6$pct_lift_high_gap - samples_m6$pct_lift_low_gap))
+```
+
+### Parameter summaries
+
+```{r}
+#| label: m6-param-summary
+
+print(fit_m6, pars = c("sigma_c", "sigma_b", "sigma_t", "kappa",
+                        "alpha_f", "alpha_t",
+                        "beta_gap", "beta_trt", "beta_gap_trt",
+                        "lambda_e", "lambda_r"))
+```
+
+### Prior vs Posterior comparisons
+
+```{r}
+#| label: fig-m6-prior-post-sigma
+#| fig-cap: "Model 6: Prior (teal) vs Posterior for dispersion parameters"
+#| fig-height: 8
+
+par(mfrow = c(2, 2))
+
+# sigma_c
+util$plot_expectand_pushforward(samples_m6[["sigma_c"]], 25,
+                                display_name = "sigma_c", flim = c(0, 1.5))
+xs <- seq(0, 1.5, 0.01)
+lines(xs, 2 * dnorm(xs, 0, 0.78), lwd = 2, col = c_light_teal)
+
+# sigma_b
+util$plot_expectand_pushforward(samples_m6[["sigma_b"]], 25,
+                                display_name = "sigma_b", flim = c(0, 1))
+xs <- seq(0, 1, 0.01)
+lines(xs, 2 * dnorm(xs, 0, 0.39), lwd = 2, col = c_light_teal)
+
+# sigma_t
+util$plot_expectand_pushforward(samples_m6[["sigma_t"]], 25,
+                                display_name = "sigma_t", flim = c(0, 0.8))
+xs <- seq(0, 0.8, 0.01)
+lines(xs, 2 * dnorm(xs, 0, 0.25), lwd = 2, col = c_light_teal)
+
+# kappa
+util$plot_expectand_pushforward(samples_m6[["kappa"]], 25,
+                                display_name = "kappa", flim = c(0, 0.4))
+xs <- seq(0, 0.4, 0.005)
+lines(xs, 2 * dnorm(xs, 0, 0.10), lwd = 2, col = c_light_teal)
+```
+
+```{r}
+#| label: fig-m6-prior-post-location
+#| fig-cap: "Model 6: Prior (teal) vs Posterior for location parameters"
+
+par(mfrow = c(1, 2))
+
+# alpha_f
+util$plot_expectand_pushforward(samples_m6[["alpha_f"]], 25,
+                                display_name = "alpha_f", flim = c(1.5, 4.5))
+xs <- seq(1.5, 4.5, 0.01)
+lines(xs, dnorm(xs, log(17), 0.30), lwd = 2, col = c_light_teal)
+
+# alpha_t
+util$plot_expectand_pushforward(samples_m6[["alpha_t"]], 25,
+                                display_name = "alpha_t", flim = c(3.5, 5.5))
+xs <- seq(3.5, 5.5, 0.01)
+lines(xs, dnorm(xs, log(90), 0.40), lwd = 2, col = c_light_teal)
+```
+
+```{r}
+#| label: fig-m6-prior-post-beta
+#| fig-cap: "Model 6: Prior (teal) vs Posterior for treatment/gap coefficients"
+
+par(mfrow = c(1, 3))
+
+# beta_gap
+util$plot_expectand_pushforward(samples_m6[["beta_gap"]], 25,
+                                display_name = "beta_gap", flim = c(0, 2))
+xs <- seq(0, 2, 0.01)
+lines(xs, dnorm(xs, 1, 0.3), lwd = 2, col = c_light_teal)
+
+# beta_trt
+util$plot_expectand_pushforward(samples_m6[["beta_trt"]], 25,
+                                display_name = "beta_trt", flim = c(-1.5, 1.5))
+xs <- seq(-1.5, 1.5, 0.01)
+lines(xs, dnorm(xs, 0, 0.7), lwd = 2, col = c_light_teal)
+
+# beta_gap_trt (the new interaction term)
+util$plot_expectand_pushforward(samples_m6[["beta_gap_trt"]], 25,
+                                display_name = "beta_gap_trt", flim = c(-0.6, 0.6))
+xs <- seq(-0.6, 0.6, 0.01)
+lines(xs, dnorm(xs, 0, 0.15), lwd = 2, col = c_light_teal)
+```
+
+```{r}
+#| label: fig-m6-prior-post-lambda
+#| fig-cap: "Model 6: Prior (teal) vs Posterior for ordinal coefficients"
+
+par(mfrow = c(1, 2))
+
+# lambda_e
+util$plot_expectand_pushforward(samples_m6[["lambda_e"]], 25,
+                                display_name = "lambda_e", flim = c(-0.5, 2.5))
+xs <- seq(-0.5, 2.5, 0.01)
+lines(xs, dnorm(xs, 1, 0.43), lwd = 2, col = c_light_teal)
+
+# lambda_r
+util$plot_expectand_pushforward(samples_m6[["lambda_r"]], 25,
+                                display_name = "lambda_r", flim = c(-0.5, 2.5))
+xs <- seq(-0.5, 2.5, 0.01)
+lines(xs, dnorm(xs, 1, 0.43), lwd = 2, col = c_light_teal)
+```
+
+```{r}
+#| label: fig-m6-prior-post-latent
+#| fig-cap: "Model 6: Prior (teal) vs Posterior for example latent variables"
+
+par(mfrow = c(1, 2))
+
+# comfort[1] - example developer comfort
+# Prior: Normal(0, sigma_c) where sigma_c ~ HalfNormal(0, 0.78)
+# Marginal prior is approximately Normal(0, 0.78) in practice
+util$plot_expectand_pushforward(samples_m6[["comfort[1]"]], 25,
+                                display_name = "comfort[1]", flim = c(-2, 2))
+xs <- seq(-2, 2, 0.01)
+lines(xs, dnorm(xs, 0, 0.78), lwd = 2, col = c_light_teal)
+
+# task_burden[1] - example task burden
+# Prior: Normal(0, sigma_b) where sigma_b ~ HalfNormal(0, 0.39)
+util$plot_expectand_pushforward(samples_m6[["task_burden[1]"]], 25,
+                                display_name = "task_burden[1]", flim = c(-1.5, 2))
+xs <- seq(-1.5, 1.5, 0.01)
+lines(xs, dnorm(xs, 0, 0.39), lwd = 2, col = c_light_teal)
+```
+
+### Individual developer completion time checks
+
+Select 4 developers with low, mid, and high mean completion times (minimum 10 observations each).
+
+```{r}
+#| label: m6-select-devs
+
+# Compute mean completion time and count per developer
+dev_mean_y <- sapply(1:stan_data_m6$J, function(j) {
+  idx <- which(stan_data_m6$dev_idx == j)
+  mean(stan_data_m6$y[idx])
+})
+
+dev_n_obs <- sapply(1:stan_data_m6$J, function(j) {
+  sum(stan_data_m6$dev_idx == j)
+})
+
+# Filter to developers with at least 10 observations
+eligible_devs <- which(dev_n_obs >= 10)
+cat("Developers with >= 10 observations:", length(eligible_devs), "of", stan_data_m6$J, "\n\n")
+
+# Select developers at different quantiles among eligible
+dev_order <- eligible_devs[order(dev_mean_y[eligible_devs])]
+n_eligible <- length(dev_order)
+selected_devs <- dev_order[c(
+  1,                            # lowest
+  round(n_eligible / 3),        # lower-mid
+  round(2 * n_eligible / 3),    # upper-mid
+  n_eligible                    # highest
+)]
+
+cat("Selected developers and their mean completion times:\n")
+for (d in selected_devs) {
+  cat("  Developer", d, ": n =", dev_n_obs[d], ", mean =", round(dev_mean_y[d], 1), "min\n")
+}
+```
+
+```{r}
+#| label: fig-m6-dev-y-checks
+#| fig-cap: "Model 6: completion time posterior predictive by developer"
+#| fig-height: 10
+
+par(mfrow = c(1,1))
+
+for (d in selected_devs) {
+  idx <- which(stan_data_m6$dev_idx == d)
+
+  # Extract y_pred for this developer's observations
+  dev_y_pred <- samples_m6[paste0('y_pred[', idx, ']')]
+  names(dev_y_pred) <- paste0('y_pred_dev[', seq_along(idx), ']')
+
+  util$plot_hist_quantiles(dev_y_pred, 'y_pred_dev', 0, 800, 25,
+                           baseline_values = stan_data_m6$y[idx],
+                           xlab = "Completion time (minutes)")
+  title(paste0("Developer ", d, " (n=", length(idx), ", mean=",
+               round(dev_mean_y[d], 0), " min)"), line = 1)
+}
+```
+
+### Treatment effect by developer comfort
+
+Compute average treatment effect for each developer and examine relationship with comfort.
+
+```{r}
+#| label: m6-trt-by-comfort
+
+n_draws <- length(samples_m6$beta_trt)
+
+# For each posterior draw, compute average treatment effect per developer
+# trt_effect_n = beta_trt + beta_gap_trt * gap_n
+# where gap_n = task_burden_n - comfort_j
+
+# Extract posterior samples
+beta_trt_draws <- samples_m6$beta_trt
+beta_gap_trt_draws <- samples_m6$beta_gap_trt
+
+# Get comfort and task_burden samples
+comfort_samples <- lapply(1:stan_data_m6$J, function(j) {
+  samples_m6[[paste0("comfort[", j, "]")]]
+})
+
+task_burden_samples <- lapply(1:stan_data_m6$N, function(n) {
+  samples_m6[[paste0("task_burden[", n, "]")]]
+})
+
+# Compute average pct_lift per developer for each draw
+avg_pct_lift_dev <- matrix(NA, nrow = n_draws, ncol = stan_data_m6$J)
+
+for (j in 1:stan_data_m6$J) {
+  idx <- which(stan_data_m6$dev_idx == j)
+
+  # For each draw, compute mean treatment effect across this developer's tasks
+  for (s in 1:n_draws) {
+    gaps <- sapply(idx, function(n) {
+      task_burden_samples[[n]][s] - comfort_samples[[j]][s]
+    })
+    trt_effects <- beta_trt_draws[s] + beta_gap_trt_draws[s] * gaps
+    avg_pct_lift_dev[s, j] <- mean((exp(trt_effects) - 1) * 100)
+  }
+}
+
+# Compute posterior mean comfort per developer
+mean_comfort_dev <- sapply(1:stan_data_m6$J, function(j) {
+  mean(comfort_samples[[j]])
+})
+```
+
+```{r}
+#| label: fig-m6-trt-vs-comfort
+#| fig-cap: "Model 6: average treatment effect vs developer comfort"
+
+# Posterior mean of average pct_lift per developer
+mean_avg_pct_lift_dev <- colMeans(avg_pct_lift_dev)
+sd_avg_pct_lift_dev <- apply(avg_pct_lift_dev, 2, sd)
+
+plot(mean_comfort_dev, mean_avg_pct_lift_dev, pch = 19,
+     xlab = "Developer comfort (posterior mean)",
+     ylab = "Avg treatment effect (% lift)",
+     main = "Treatment effect vs comfort by developer")
+segments(mean_comfort_dev, mean_avg_pct_lift_dev - 2*sd_avg_pct_lift_dev,
+         mean_comfort_dev, mean_avg_pct_lift_dev + 2*sd_avg_pct_lift_dev,
+         col = "gray")
+abline(h = 0, lty = 2)
+
+# Add regression line
+fit_line <- lm(mean_avg_pct_lift_dev ~ mean_comfort_dev)
+abline(fit_line, col = "red", lwd = 2)
+```
+
+```{r}
+#| label: fig-m6-trt-by-comfort-bin
+#| fig-cap: "Model 6: treatment effect distribution by comfort tercile"
+
+# Bin developers by comfort terciles
+comfort_terciles <- cut(mean_comfort_dev,
+                        breaks = quantile(mean_comfort_dev, c(0, 1/3, 2/3, 1)),
+                        labels = c("Low comfort", "Mid comfort", "High comfort"),
+                        include.lowest = TRUE)
+
+par(mfrow = c(1, 3))
+
+for (tercile in levels(comfort_terciles)) {
+  dev_in_tercile <- which(comfort_terciles == tercile)
+
+  # Pool all posterior draws of avg_pct_lift for developers in this tercile
+  pooled_pct_lift <- as.vector(avg_pct_lift_dev[, dev_in_tercile])
+
+  util$plot_line_hist(pooled_pct_lift, -80, 80, 4,
+                      xlab = "Avg % lift")
+  abline(v = 0, lty = 2, lwd = 2)
+  title(paste0(tercile, " (n=", length(dev_in_tercile), " devs)"), line = 1)
+}
+```
+
+```{r}
+#| label: m6-trt-by-comfort-summary
+
+cat("Treatment effect by comfort tercile:\n\n")
+
+for (tercile in levels(comfort_terciles)) {
+  dev_in_tercile <- which(comfort_terciles == tercile)
+  pooled_pct_lift <- as.vector(avg_pct_lift_dev[, dev_in_tercile])
+
+  cat(tercile, ":\n")
+  print(util$my_q(pooled_pct_lift))
+  cat("\n")
+}
+```
+
+### Completion time and treatment effect by gap
+
+Bin observations by inferred gap (task_burden - comfort) and examine completion time fit and treatment effects.
+
+```{r}
+#| label: m6-gap-bins
+
+# Compute posterior mean gap per observation
+mean_gap <- sapply(1:stan_data_m6$N, function(n) {
+  j <- stan_data_m6$dev_idx[n]
+  mean(task_burden_samples[[n]] - comfort_samples[[j]])
+})
+
+# Bin observations by gap terciles
+gap_terciles <- cut(mean_gap,
+                    breaks = quantile(mean_gap, c(0, 1/3, 2/3, 1)),
+                    labels = c("Low gap (easy)", "Mid gap", "High gap (hard)"),
+                    include.lowest = TRUE)
+
+cat("Observations by gap tercile:\n")
+print(table(gap_terciles))
+```
+
+```{r}
+#| label: fig-m6-y-by-gap
+#| fig-cap: "Model 6: completion time posterior predictive by gap tercile"
+#| fig-height: 4
+
+par(mfrow = c(1, 1))
+
+for (tercile in levels(gap_terciles)) {
+  idx <- which(gap_terciles == tercile)
+
+  # Extract y_pred for observations in this tercile
+  gap_y_pred <- samples_m6[paste0('y_pred[', idx, ']')]
+  names(gap_y_pred) <- paste0('y_pred_gap[', seq_along(idx), ']')
+
+  util$plot_hist_quantiles(gap_y_pred, 'y_pred_gap', 0, 800, 25,
+                           baseline_values = stan_data_m6$y[idx],
+                           xlab = "Completion time (minutes)")
+  title(paste0(tercile, " (n=", length(idx), ")"), line = 1)
+}
+```
+
+```{r}
+#| label: m6-trt-by-gap
+
+# Compute treatment effect for each observation at each posterior draw
+# trt_effect_n = beta_trt + beta_gap_trt * gap_n
+
+pct_lift_obs <- matrix(NA, nrow = n_draws, ncol = stan_data_m6$N)
+
+for (n in 1:stan_data_m6$N) {
+  j <- stan_data_m6$dev_idx[n]
+  for (s in 1:n_draws) {
+    gap <- task_burden_samples[[n]][s] - comfort_samples[[j]][s]
+    trt_effect <- beta_trt_draws[s] + beta_gap_trt_draws[s] * gap
+    pct_lift_obs[s, n] <- (exp(trt_effect) - 1) * 100
+  }
+}
+```
+
+```{r}
+#| label: fig-m6-trt-by-gap
+#| fig-cap: "Model 6: treatment effect distribution by gap tercile"
+
+par(mfrow = c(1, 1))
+
+for (tercile in levels(gap_terciles)) {
+  idx <- which(gap_terciles == tercile)
+
+  # Pool all posterior draws for observations in this tercile
+  pooled_pct_lift <- as.vector(pct_lift_obs[, idx])
+
+  util$plot_line_hist(pooled_pct_lift, -80, 80, 4,
+                      xlab = "% lift")
+  abline(v = 0, lty = 2, lwd = 2)
+  title(paste0(tercile, " (n=", length(idx), " obs)"), line = 1)
+}
+```
+
+```{r}
+#| label: m6-trt-by-gap-summary
+
+cat("Treatment effect by gap tercile:\n\n")
+
+for (tercile in levels(gap_terciles)) {
+  idx <- which(gap_terciles == tercile)
+  pooled_pct_lift <- as.vector(pct_lift_obs[, idx])
+
+  cat(tercile, ":\n")
+  print(util$my_q(pooled_pct_lift))
+  cat("\n")
+}
+```
+
+### Compare treatment effects across models
+
+Note: Model 6 has heterogeneous treatment effects; this shows the effect at gap = 0.
+
+```{r}
+#| label: fig-m6-compare-trt
+#| fig-cap: "Treatment effect comparison: Models 1-6 (M6 at gap = 0)"
+
+util$plot_line_hist(samples_m1$pct_lift, -60, 60, 2.5,
+                    xlab = "% change in completion time",
+                    col = util$c_light)
+util$plot_line_hist(samples_m2$pct_lift, -60, 60, 2.5,
+                    col = util$c_mid, add = TRUE)
+util$plot_line_hist(samples_m3$pct_lift, -60, 60, 2.5,
+                    col = util$c_dark, add = TRUE)
+util$plot_line_hist(samples_m4$pct_lift, -60, 60, 2.5,
+                    col = util$c_mid_highlight, add = TRUE)
+util$plot_line_hist(samples_m5$pct_lift, -60, 60, 2.5,
+                    col = util$c_dark_highlight, add = TRUE)
+util$plot_line_hist(samples_m6$pct_lift, -60, 60, 2.5,
+                    col = "purple", add = TRUE)
+
+abline(v = 0, lty = 2, lwd = 2)
+
+legend("topright", c("Model 1", "Model 2", "Model 3", "Model 4", "Model 5", "Model 6 (gap=0)"),
+       fill = c(util$c_light, util$c_mid, util$c_dark, util$c_mid_highlight, util$c_dark_highlight, "purple"))
+```
+
+### Compare M5 vs M6: Log Completion Time Posterior Predictive
+
+```{r}
+#| label: fig-m5-m6-compare-log-y
+#| fig-cap: "Log completion time posterior predictive: Model 5 (top) vs Model 6 (bottom)"
+#| fig-height: 8
+
+par(mfrow = c(2, 1))
+
+# Model 5
+util$plot_hist_quantiles(samples_m5, 'log_y_pred', 2, 8, 0.25,
+                         baseline_values = log(stan_data_m5$y),
+                         xlab = "log(completion time)")
+title("Model 5 (homogeneous treatment)", line = 1)
+
+# Model 6
+util$plot_hist_quantiles(samples_m6, 'log_y_pred', 2, 8, 0.25,
+                         baseline_values = log(stan_data_m6$y),
+                         xlab = "log(completion time)")
+title("Model 6 (heterogeneous treatment)", line = 1)
+```
+
+## Appendix: Investigating Diagnostics in Model 6
+
+```{r}
+#| label: m6-diagnostics-extract
+
+diagnostics_m6 <- util$extract_hmc_diagnostics(fit_m6)
+```
+
+### Key parameter posteriors by chain
+
+```{r}
+#| label: fig-m6-beta-gap-trt-by-chain
+#| fig-cap: "Model 6: beta_gap_trt posterior by chain"
+
+util$plot_pairs_by_chain(
+  samples_m6[["beta_gap_trt"]], "beta_gap_trt",
+  samples_m6[["beta_trt"]], "beta_trt"
+)
+
+util$plot_pairs_by_chain(
+  samples_m6[["beta_gap_trt"]], "beta_gap_trt",
+  samples_m6[["beta_gap"]], "beta_gap"
+)
+```
+
+### Divergence locations
+
+Where are divergences occurring?
+
+```{r}
+#| label: fig-m6-div-pairs
+#| fig-cap: "Model 6: divergence locations"
+#| fig-width: 10
+#| fig-height: 8
+
+util$plot_div_pairs(
+  x_names = c("sigma_t"),
+  y_names = c("sigma_c", "sigma_b", "alpha_f", "kappa", "beta_gap",
+               "beta_trt", "beta_gap_trt", "alpha_t"),
+  expectand_vals_list = samples_m6,
+  diagnostics = diagnostics_m6,
+  plot_mode = 0
+)
+```
+
+### Developer comfort and task burden posteriors
+
+```{r}
+#| label: fig-m6-dev-comfort-burden
+#| fig-cap: "Model 6: developer-specific comfort and task burden posteriors"
+par(mfrow=c(1,2))
+
+for (dev in c(1, 5, 10, 15)) {
+
+  dev_idx <- which(stan_data_m6$dev_idx == dev)
+
+  util$plot_expectand_pushforward(samples_m6[[paste0('comfort[', dev, ']')]], 25, flim=c(-1,1))
+  abline(v=0)
+  title(paste("Developer", dev, "comfort"))
+
+  task_burden_means <- sapply(dev_idx, function(j) {
+    mean(samples_m6[[paste0("task_burden[", j, "]")]])
+  })
+
+  task_burden_sds <- sapply(dev_idx, function(j) {
+    sd(samples_m6[[paste0("task_burden[", j, "]")]])
+  })
+
+  ord <- order(task_burden_means)
+
+  plot(1:length(dev_idx), task_burden_means[ord], pch = 19,
+       xlab = "Task (ordered by mean task burden)",
+       ylab = "Task Burden",
+       ylim = c(-2, 2),
+       main = paste("Developer", dev, "task burdens (±2 SD)"))
+  segments(1:length(dev_idx), task_burden_means[ord] - 2*task_burden_sds[ord],
+           1:length(dev_idx), task_burden_means[ord] + 2*task_burden_sds[ord])
+  abline(h = 0, lty = 2)
+}
+```
+
+### Chain mixing for key parameters
+
+```{r}
+#| label: fig-m6-pairs-chain
+#| fig-cap: "Model 6: chain mixing for key parameters"
+
+util$plot_pairs_by_chain(
+  samples_m6[["sigma_b"]], "sigma_b",
+  samples_m6[["beta_gap"]], "beta_gap"
+)
+
+util$plot_pairs_by_chain(
+  samples_m6[["sigma_c"]], "sigma_c",
+  samples_m6[["beta_gap"]], "beta_gap"
+)
+
+util$plot_pairs_by_chain(
+  samples_m6[["beta_trt"]], "beta_trt",
+  samples_m6[["beta_gap_trt"]], "beta_gap_trt"
+)
+```
+
+### Trajectory lengths by chain
+
+```{r}
+#| label: fig-m6-leapfrogs
+#| fig-cap: "Model 6: trajectory lengths by chain"
+
+util$plot_num_leapfrogs_by_chain(diagnostics_m6)
 ```

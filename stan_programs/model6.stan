@@ -1,4 +1,6 @@
-// Model 5: Developer Comfort + Task Burden (Gap Parameterization)
+// Model 6: Heterogeneous Treatment Effect (Gap Interaction)
+//
+// Extends Model 5 by allowing the treatment effect to vary with gap.
 //
 // Latent structure:
 //   comfort_j ~ Normal(0, sigma_c)          [developer-level, J]
@@ -9,9 +11,13 @@
 //   exposure ~ OrderedLogistic(lambda_e * comfort, cut_points_e)
 //   resources ~ OrderedLogistic(lambda_r * gap, cut_points_r)
 //   forecast ~ NegBinomial2(exp(alpha_f + gap), phi)
-//   y ~ Lognormal(alpha_t + beta_gap * gap + beta_trt * ai, sigma_t)
+//   y ~ Lognormal(alpha_t + beta_gap * gap + beta_trt * ai + beta_gap_trt * gap * ai, sigma_t)
 //
-// Identification: gap coefficient = 1 in forecast (identifies latent scale)
+// Treatment effect = beta_trt + beta_gap_trt * gap
+//   beta_trt: effect at gap = 0 (average task for average developer)
+//   beta_gap_trt: how effect changes per unit gap
+//     > 0: AI helps less for harder tasks
+//     < 0: AI helps more for harder tasks
 
 functions {
   real ordinal_shifted_logistic_lpmf(int y, vector c, real gamma) {
@@ -99,7 +105,8 @@ parameters {
 
   // Coefficients
   real beta_gap;            // Gap -> completion
-  real beta_trt;            // Treatment effect
+  real beta_trt;            // Treatment effect (at gap = 0)
+  real beta_gap_trt;        // Gap x treatment interaction
   real lambda_e;            // Comfort -> exposure
   real lambda_r;            // Gap -> resources
 
@@ -138,6 +145,7 @@ model {
   // Priors on coefficients
   beta_gap ~ normal(1, 0.3);
   beta_trt ~ normal(0, 0.7);
+  beta_gap_trt ~ normal(0, 0.15);  // Interaction centered at zero
   lambda_e ~ normal(1, 0.43);
   lambda_r ~ normal(1, 0.43);
 
@@ -174,12 +182,12 @@ model {
     resources[i] ~ ordinal_shifted_logistic(cut_points_r, gamma_r);
   }
 
-  // Likelihood for completion times
+  // Likelihood for completion times (with heterogeneous treatment effect)
   {
     vector[N] mu_t;
     for (n in 1:N) {
       real gap = task_burden[n] - comfort[dev_idx[n]];
-      mu_t[n] = alpha_t + beta_gap * gap + beta_trt * ai_access[n];
+      mu_t[n] = alpha_t + beta_gap * gap + beta_trt * ai_access[n] + beta_gap_trt * gap * ai_access[n];
     }
     log_y ~ normal(mu_t, sigma_t);
   }
@@ -192,7 +200,7 @@ generated quantities {
 
   for (n in 1:N) {
     real gap = task_burden[n] - comfort[dev_idx[n]];
-    real mu_t_n = alpha_t + beta_gap * gap + beta_trt * ai_access[n];
+    real mu_t_n = alpha_t + beta_gap * gap + beta_trt * ai_access[n] + beta_gap_trt * gap * ai_access[n];
     y_pred[n] = lognormal_rng(mu_t_n, sigma_t);
     log_y_pred[n] = log(y_pred[n]);
   }
@@ -223,6 +231,10 @@ generated quantities {
     resources_pred[n] = ordinal_shifted_logistic_rng(cut_points_r, gamma_r);
   }
 
-  // Treatment effect as percentage lift
+  // Treatment effect at gap = 0 (percentage lift)
   real pct_lift = (exp(beta_trt) - 1) * 100;
+
+  // Treatment effect at different gap values (percentage lift)
+  real pct_lift_low_gap = (exp(beta_trt + beta_gap_trt * (-1)) - 1) * 100;   // Easy task (gap = -1)
+  real pct_lift_high_gap = (exp(beta_trt + beta_gap_trt * (1)) - 1) * 100;   // Hard task (gap = +1)
 }

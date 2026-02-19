@@ -1,4 +1,6 @@
-// Model 5 Prior Predictive: Developer Comfort + Task Burden (Gap Parameterization)
+// Model 6 Prior Predictive: Heterogeneous Treatment Effect (Gap Interaction)
+//
+// Extends Model 5 by allowing the treatment effect to vary with gap.
 //
 // Latent structure:
 //   comfort_j ~ Normal(0, sigma_c)          [developer-level, J]
@@ -9,10 +11,15 @@
 //   exposure ~ OrderedLogistic(lambda_e * comfort, cut_points_e)
 //   resources ~ OrderedLogistic(lambda_r * gap, cut_points_r)
 //   forecast ~ NegBinomial2(exp(alpha_f + gap), phi)
-//   y ~ Lognormal(alpha_t + beta_gap * gap + beta_trt * ai, sigma_t)
+//   y ~ Lognormal(alpha_t + beta_gap * gap + beta_trt * ai + beta_gap_trt * gap * ai, sigma_t)
+//
+// Treatment effect = beta_trt + beta_gap_trt * gap
+//   beta_trt: effect at gap = 0 (average task for average developer)
+//   beta_gap_trt: how effect changes per unit gap
+//     > 0: AI helps less for harder tasks
+//     < 0: AI helps more for harder tasks
 
 functions {
-  // Betancourt's ordinal functions
   int ordinal_shifted_logistic_rng(vector c, real gamma) {
     int K = num_elements(c) + 1;
     vector[K - 1] Pi = inv_logit(c - gamma);
@@ -39,8 +46,6 @@ data {
   array[N] int<lower=0, upper=1> ai_access;
 
   // Dirichlet hyperparameters
-  // DECIDED: rho_e = (1/5, ..., 1/5), tau_e = 0.1 for exposure (K=5)
-  // DECIDED: rho_r = (1/3, 1/3, 1/3), tau_r = 0.2 for resources (K=3)
   vector<lower=0>[5] rho_e;
   real<lower=0> tau_e;
   vector<lower=0>[3] rho_r;
@@ -54,9 +59,10 @@ transformed data {
 
 generated quantities {
   //==========================================================================
-  // PARAMETERS FROM M4 (DECIDED - keep same priors)
+  // DISPERSION AND LOCATION PARAMETERS
   //==========================================================================
 
+  real<lower=0> sigma_c = abs(normal_rng(0, 0.78));   // Developer comfort spread
   real<lower=0> sigma_b = abs(normal_rng(0, 0.39));   // Task burden spread
   real<lower=0> sigma_t = abs(normal_rng(0, 0.25));   // Completion noise
   real<lower=0> kappa = abs(normal_rng(0, 0.10));     // Forecast overdispersion
@@ -65,34 +71,24 @@ generated quantities {
   real alpha_f = normal_rng(log(17), 0.30);           // Log expected (forecast/5 - 1)
   real alpha_t = normal_rng(log(90), 0.40);           // Log median completion
 
+  //==========================================================================
+  // COEFFICIENTS
+  //==========================================================================
+
   real beta_gap = normal_rng(1, 0.3);                 // Gap -> completion
-  real beta_trt = normal_rng(0, 0.7);                 // Treatment effect
+  real beta_trt = normal_rng(0, 0.7);                 // Treatment effect (at gap = 0)
+  real beta_gap_trt = normal_rng(0, 0.15);            // Gap x treatment interaction
+
+  real lambda_e = normal_rng(1, 0.43);                // Comfort -> exposure
+  real lambda_r = normal_rng(1, 0.43);                // Gap -> resources
 
   //==========================================================================
-  // DEVELOPER COMFORT PARAMETERS
+  // CUTPOINTS
   //==========================================================================
 
-  // Developer comfort spread (identified by gap coefficient = 1 in forecast)
-  // 99% prior mass below 2 (would be shocked by 5x+ multiplicative differences)
-  real<lower=0> sigma_c = abs(normal_rng(0, 0.78));   // HalfNormal(0, 2/2.57)
-
-  // Comfort -> exposure (positive: more comfort -> higher familiarity)
-  real lambda_e = normal_rng(1, 0.43);
-
-  // Gap -> resources (positive: higher gap -> more resources needed)
-  real lambda_r = normal_rng(1, 0.43);
-
-  // NOTE: gap coefficient fixed to 1 in forecast for identification
-
-  //==========================================================================
-  // CUTPOINTS (DECIDED)
-  //==========================================================================
-
-  // Exposure cutpoints (K=5)
   simplex[5] baseline_p_e = dirichlet_rng(alpha_dir_e);
   ordered[4] cut_points_e = derived_cut_points(baseline_p_e);
 
-  // Resources cutpoints (K=3)
   simplex[3] baseline_p_r = dirichlet_rng(alpha_dir_r);
   ordered[2] cut_points_r = derived_cut_points(baseline_p_r);
 
@@ -120,16 +116,18 @@ generated quantities {
   vector[N] forecast_sim;
   vector[N] y_sim;
   vector[N] log_y_sim;
+  vector[N] gap_sim;  // Store gap for analysis
 
   for (n in 1:N) {
     int j = dev_idx[n];
     real gap = task_burden[n] - comfort[j];
+    gap_sim[n] = gap;
 
     // Exposure: comfort only
     real gamma_e = lambda_e * comfort[j];
     exposure_sim[n] = ordinal_shifted_logistic_rng(cut_points_e, gamma_e);
 
-    // Resources: gap (task burden - comfort)
+    // Resources: gap
     real gamma_r = lambda_r * gap;
     resources_sim[n] = ordinal_shifted_logistic_rng(cut_points_r, gamma_r);
 
@@ -138,16 +136,22 @@ generated quantities {
     forecast_shifted_sim[n] = neg_binomial_2_rng(mu_f, phi);
     forecast_sim[n] = 5.0 * (forecast_shifted_sim[n] + 1);
 
-    // Completion time: gap + treatment
-    real mu_t = alpha_t + beta_gap * gap + beta_trt * ai_access[n];
+    // Completion time: gap + heterogeneous treatment
+    real mu_t = alpha_t + beta_gap * gap + beta_trt * ai_access[n] + beta_gap_trt * gap * ai_access[n];
     y_sim[n] = lognormal_rng(mu_t, sigma_t);
     log_y_sim[n] = log(y_sim[n]);
   }
 
-  // Treatment effect as percentage lift
+  // Treatment effect at gap = 0 (percentage lift)
   real pct_lift = (exp(beta_trt) - 1) * 100;
 
-  // Summary statistics for simulated outcomes
+  // Treatment effect at different gap values (percentage lift)
+  real pct_lift_low_gap = (exp(beta_trt + beta_gap_trt * (-1)) - 1) * 100;   // Easy task (gap = -1)
+  real pct_lift_high_gap = (exp(beta_trt + beta_gap_trt * (1)) - 1) * 100;   // Hard task (gap = +1)
+
+  // Summary statistics
   real mean_exposure = mean(to_vector(exposure_sim));
   real mean_resources = mean(to_vector(resources_sim));
+  real mean_gap = mean(gap_sim);
+  real sd_gap = sd(gap_sim);
 }
