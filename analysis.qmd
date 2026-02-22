@@ -486,7 +486,7 @@ $$\rho = \frac{\beta_{\text{burden}} \sigma_b^2}{\sqrt{(\sigma_b^2 + \sigma_f^2)
 ## Prior Development
 
 | Parameter | Prior | Interpretation |
-|------------------------|------------------------|------------------------|
+|----|----|----|
 | σ_b | Half-Normal(0, 0.39) | Task burden spread; 99% \< 1 |
 | σ_f | Half-Normal(0, 0.39) | Forecast noise after burden; 99% \< 1 |
 | σ_t | Half-Normal(0, 0.25) | Completion noise after burden; 99% \< 0.64 |
@@ -736,7 +736,7 @@ This model is *not* marginalized — we estimate task_burden explicitly. The dis
 ## Prior Development
 
 | Parameter | Prior | Interpretation |
-|------------------------|------------------------|------------------------|
+|----|----|----|
 | sigma_b | Half-Normal(0, 0.39) | Task burden spread; 99% \< 1 |
 | sigma_t | Half-Normal(0, 0.25) | Completion noise; 99% \< 0.64 |
 | kappa | Half-Normal(0, 0.10) | Overdispersion; 99% \< 0.25; SD(forecast) \< 50 min |
@@ -1119,7 +1119,7 @@ where cutpoints $\mathbf{c}$ are derived from a Dirichlet prior on baseline prob
 ### Parameters from M3 (unchanged)
 
 | Parameter | Prior | Interpretation |
-|------------------------|------------------------|------------------------|
+|----|----|----|
 | $\sigma_b$ | Half-Normal(0, 0.39) | Task burden spread; 99% \< 1 |
 | $\sigma_t$ | Half-Normal(0, 0.25) | Completion noise; 99% \< 0.64 |
 | $\kappa$ | Half-Normal(0, 0.10) | Forecast overdispersion |
@@ -1131,7 +1131,7 @@ where cutpoints $\mathbf{c}$ are derived from a Dirichlet prior on baseline prob
 ### New parameters for resources
 
 | Parameter | Prior | Interpretation |
-|------------------------|------------------------|------------------------|
+|----|----|----|
 | $\boldsymbol{\rho}$ | (1/3, 1/3, 1/3) | Symmetric baseline for Dirichlet |
 | $\tau$ | 0.2 (fixed) | Dirichlet concentration; $\alpha = (2.67, 2.67, 2.67)$ |
 | $\lambda_r$ | Normal(1, 0.43) | Burden → resources; positive, 99% \< 2 |
@@ -3210,4 +3210,1038 @@ util$plot_pairs_by_chain(
 #| fig-cap: "Model 6: trajectory lengths by chain"
 
 util$plot_num_leapfrogs_by_chain(diagnostics_m6)
+```
+
+# Exploratory: Within-Developer Relationships
+
+Before building Model 7, we validate the assumed within-developer relationships:
+
+1.  Higher exposure → faster completion (within developer)
+2.  Higher resources → slower completion (within developer)
+
+If these hold, it supports the model structure where exposure and resources are both informed by task-level burden.
+
+```{r}
+#| label: within-dev-setup
+
+# Prepare data with exposure and resources
+dat_explore <- dat[!is.na(dat$total_time), ]
+dat_explore$log_y <- log(dat_explore$total_time)
+dat_explore$exposure <- dat_explore$prior_task_exposure_1_to_5
+dat_explore$resources <- dat_explore$external_resource_needs_1_to_3
+dat_explore$resources[dat_explore$resources == 5] <- 3  # recode as before
+```
+
+## Within-developer correlations
+
+For each developer with at least 5 observations, compute the correlation between exposure and log completion time.
+
+```{r}
+#| label: fig-within-dev-cor-exposure
+#| fig-cap: "Within-developer correlations: exposure vs log(completion time)"
+
+# Get developers with enough observations for exposure
+dev_counts_exp <- tapply(!is.na(dat_explore$exposure), dat_explore$dev_num, sum)
+devs_with_exposure <- as.integer(names(dev_counts_exp[dev_counts_exp >= 5]))
+
+# Compute within-developer correlations
+within_cor_exposure <- sapply(devs_with_exposure, function(d) {
+  idx <- dat_explore$dev_num == d & !is.na(dat_explore$exposure)
+  if (sum(idx) >= 5) {
+    cor(dat_explore$exposure[idx], dat_explore$log_y[idx])
+  } else {
+    NA
+  }
+})
+within_cor_exposure <- within_cor_exposure[!is.na(within_cor_exposure)]
+
+# Histogram
+hist(within_cor_exposure, breaks = 20, col = "steelblue", border = "white",
+     main = "Within-developer correlation: exposure vs log(completion)",
+     xlab = "Correlation",
+     sub = "Negative values support: high exposure → faster completion")
+abline(v = 0, lty = 2, lwd = 2)
+abline(v = median(within_cor_exposure), col = "red", lwd = 2)
+
+cat("Median within-developer correlation:", round(median(within_cor_exposure), 3), "\n")
+cat("Proportion negative:", round(mean(within_cor_exposure < 0), 2), "\n")
+```
+
+```{r}
+#| label: fig-within-dev-cor-resources
+#| fig-cap: "Within-developer correlations: resources vs log(completion time)"
+
+# Get developers with enough observations for resources
+dev_counts_res <- tapply(!is.na(dat_explore$resources), dat_explore$dev_num, sum)
+devs_with_resources <- as.integer(names(dev_counts_res[dev_counts_res >= 5]))
+
+# Compute within-developer correlations
+within_cor_resources <- sapply(devs_with_resources, function(d) {
+  idx <- dat_explore$dev_num == d & !is.na(dat_explore$resources)
+  if (sum(idx) >= 5) {
+    cor(dat_explore$resources[idx], dat_explore$log_y[idx])
+  } else {
+    NA
+  }
+})
+within_cor_resources <- within_cor_resources[!is.na(within_cor_resources)]
+
+# Histogram
+hist(within_cor_resources, breaks = 20, col = "coral", border = "white",
+     main = "Within-developer correlation: resources vs log(completion)",
+     xlab = "Correlation",
+     sub = "Positive values support: high resources → slower completion")
+abline(v = 0, lty = 2, lwd = 2)
+abline(v = median(within_cor_resources), col = "red", lwd = 2)
+
+cat("Median within-developer correlation:", round(median(within_cor_resources), 3), "\n")
+cat("Proportion positive:", round(mean(within_cor_resources > 0), 2), "\n")
+```
+
+## Developer-demeaned scatterplots
+
+Remove between-developer variation to isolate within-developer relationships.
+
+```{r}
+#| label: fig-demeaned-exposure
+#| fig-cap: "Within-developer: exposure vs log(completion time) - both demeaned"
+
+# Demean within developers (exposure)
+dat_exp <- dat_explore[!is.na(dat_explore$exposure), ]
+dev_means_log_y <- tapply(dat_exp$log_y, dat_exp$dev_num, mean)
+dev_means_exp <- tapply(dat_exp$exposure, dat_exp$dev_num, mean)
+
+dat_exp$log_y_demeaned <- dat_exp$log_y - dev_means_log_y[as.character(dat_exp$dev_num)]
+dat_exp$exposure_demeaned <- dat_exp$exposure - dev_means_exp[as.character(dat_exp$dev_num)]
+
+# Jittered scatterplot
+plot(jitter(dat_exp$exposure_demeaned, amount = 0.1), dat_exp$log_y_demeaned,
+     pch = 19, col = rgb(0, 0, 0, 0.3), cex = 0.8,
+     xlab = "Exposure (demeaned within developer)",
+     ylab = "Log completion time (demeaned within developer)",
+     main = "Within-developer: exposure vs completion time")
+
+# Add regression line
+fit_exp <- lm(log_y_demeaned ~ exposure_demeaned, data = dat_exp)
+abline(fit_exp, col = "red", lwd = 2)
+abline(h = 0, lty = 2)
+
+cat("Within-developer slope (exposure → log completion):",
+    round(coef(fit_exp)[2], 4), "\n")
+cat("Expected: negative (higher exposure → faster)\n")
+```
+
+```{r}
+#| label: fig-demeaned-resources
+#| fig-cap: "Within-developer: resources vs log(completion time) - both demeaned"
+
+# Demean within developers (resources)
+dat_res <- dat_explore[!is.na(dat_explore$resources), ]
+dev_means_log_y_r <- tapply(dat_res$log_y, dat_res$dev_num, mean)
+dev_means_res <- tapply(dat_res$resources, dat_res$dev_num, mean)
+
+dat_res$log_y_demeaned <- dat_res$log_y - dev_means_log_y_r[as.character(dat_res$dev_num)]
+dat_res$resources_demeaned <- dat_res$resources - dev_means_res[as.character(dat_res$dev_num)]
+
+# Jittered scatterplot
+plot(jitter(dat_res$resources_demeaned, amount = 0.1), dat_res$log_y_demeaned,
+     pch = 19, col = rgb(0, 0, 0, 0.3), cex = 0.8,
+     xlab = "Resources (demeaned within developer)",
+     ylab = "Log completion time (demeaned within developer)",
+     main = "Within-developer: resources vs completion time")
+
+# Add regression line
+fit_res <- lm(log_y_demeaned ~ resources_demeaned, data = dat_res)
+abline(fit_res, col = "red", lwd = 2)
+abline(h = 0, lty = 2)
+
+cat("Within-developer slope (resources → log completion):",
+    round(coef(fit_res)[2], 4), "\n")
+cat("Expected: positive (higher resources → slower)\n")
+```
+
+## Mean completion time by ordinal level (within-developer standardized)
+
+```{r}
+#| label: fig-exposure-bars
+#| fig-cap: "Within-developer standardized completion time by exposure level"
+
+# Compute within-developer z-scores
+dat_exp$z_log_y <- (dat_exp$log_y - dev_means_log_y[as.character(dat_exp$dev_num)]) /
+                   tapply(dat_exp$log_y, dat_exp$dev_num, sd)[as.character(dat_exp$dev_num)]
+
+# Handle developers with zero variance (only one observation after filtering)
+dat_exp$z_log_y[!is.finite(dat_exp$z_log_y)] <- NA
+
+# Mean z-score by exposure level
+mean_z_by_exposure <- tapply(dat_exp$z_log_y, dat_exp$exposure, mean, na.rm = TRUE)
+n_by_exposure <- tapply(dat_exp$z_log_y, dat_exp$exposure, function(x) sum(!is.na(x)))
+
+barplot(mean_z_by_exposure, names.arg = names(mean_z_by_exposure),
+        col = "steelblue", border = "white",
+        xlab = "Exposure level", ylab = "Mean within-developer z-score",
+        main = "Completion time by exposure (within-developer standardized)",
+        sub = "Negative bars = faster than developer's average")
+abline(h = 0, lty = 2, lwd = 2)
+
+cat("Mean z-score by exposure level:\n")
+print(round(mean_z_by_exposure, 3))
+cat("\nN by exposure level:\n")
+print(n_by_exposure)
+```
+
+```{r}
+#| label: fig-resources-bars
+#| fig-cap: "Within-developer standardized completion time by resources level"
+
+# Compute within-developer z-scores
+dat_res$z_log_y <- (dat_res$log_y - dev_means_log_y_r[as.character(dat_res$dev_num)]) /
+                   tapply(dat_res$log_y, dat_res$dev_num, sd)[as.character(dat_res$dev_num)]
+
+dat_res$z_log_y[!is.finite(dat_res$z_log_y)] <- NA
+
+# Mean z-score by resources level
+mean_z_by_resources <- tapply(dat_res$z_log_y, dat_res$resources, mean, na.rm = TRUE)
+n_by_resources <- tapply(dat_res$z_log_y, dat_res$resources, function(x) sum(!is.na(x)))
+
+barplot(mean_z_by_resources, names.arg = names(mean_z_by_resources),
+        col = "coral", border = "white",
+        xlab = "Resources level", ylab = "Mean within-developer z-score",
+        main = "Completion time by resources (within-developer standardized)",
+        sub = "Positive bars = slower than developer's average")
+abline(h = 0, lty = 2, lwd = 2)
+
+cat("Mean z-score by resources level:\n")
+print(round(mean_z_by_resources, 3))
+cat("\nN by resources level:\n")
+print(n_by_resources)
+```
+
+## Individual developer facets
+
+```{r}
+#| label: fig-facet-exposure
+#| fig-cap: "Exposure vs log(completion time) for developers with most observations"
+#| fig-height: 6
+
+# Select top 6 developers by number of exposure observations
+n_exp_by_dev <- tapply(!is.na(dat_explore$exposure), dat_explore$dev_num, sum)
+top_devs <- as.integer(names(sort(n_exp_by_dev, decreasing = TRUE)[1:6]))
+
+par(mfrow = c(2, 3))
+for (d in top_devs) {
+  idx <- dat_explore$dev_num == d & !is.na(dat_explore$exposure)
+  plot(jitter(dat_explore$exposure[idx], amount = 0.15), dat_explore$log_y[idx],
+       pch = 19, col = rgb(0.2, 0.4, 0.6, 0.7),
+       xlab = "Exposure", ylab = "Log completion time",
+       main = paste0("Developer ", d, " (n=", sum(idx), ")"),
+       xlim = c(0.5, 5.5))
+
+  if (sum(idx) >= 3) {
+    fit <- lm(log_y ~ exposure, data = dat_explore[idx, ])
+    abline(fit, col = "red", lwd = 2)
+  }
+}
+```
+
+```{r}
+#| label: fig-facet-resources
+#| fig-cap: "Resources vs log(completion time) for developers with most observations"
+#| fig-height: 6
+
+# Select top 6 developers by number of resources observations
+n_res_by_dev <- tapply(!is.na(dat_explore$resources), dat_explore$dev_num, sum)
+top_devs_res <- as.integer(names(sort(n_res_by_dev, decreasing = TRUE)[1:6]))
+
+par(mfrow = c(2, 3))
+for (d in top_devs_res) {
+  idx <- dat_explore$dev_num == d & !is.na(dat_explore$resources)
+  plot(jitter(dat_explore$resources[idx], amount = 0.15), dat_explore$log_y[idx],
+       pch = 19, col = rgb(0.8, 0.4, 0.3, 0.7),
+       xlab = "Resources", ylab = "Log completion time",
+       main = paste0("Developer ", d, " (n=", sum(idx), ")"),
+       xlim = c(0.5, 3.5))
+
+  if (sum(idx) >= 3) {
+    fit <- lm(log_y ~ resources, data = dat_explore[idx, ])
+    abline(fit, col = "red", lwd = 2)
+  }
+}
+```
+
+## Summary
+
+```{r}
+#| label: within-dev-summary
+
+cat("=== WITHIN-DEVELOPER RELATIONSHIP SUMMARY ===\n\n")
+
+cat("EXPOSURE → COMPLETION TIME:\n")
+cat("  Median within-dev correlation:", round(median(within_cor_exposure), 3), "\n")
+cat("  Proportion negative:", round(mean(within_cor_exposure < 0), 2), "\n")
+cat("  Pooled within-dev slope:", round(coef(fit_exp)[2], 4), "\n")
+cat("  Expected: NEGATIVE (high exposure → fast completion)\n\n")
+
+cat("RESOURCES → COMPLETION TIME:\n")
+cat("  Median within-dev correlation:", round(median(within_cor_resources), 3), "\n")
+cat("  Proportion positive:", round(mean(within_cor_resources > 0), 2), "\n")
+cat("  Pooled within-dev slope:", round(coef(fit_res)[2], 4), "\n")
+cat("  Expected: POSITIVE (high resources → slow completion)\n\n")
+
+cat("If both expectations hold, it supports:\n")
+cat("  - exposure ~ f(-burden)\n")
+cat("  - resources ~ f(+burden)\n")
+cat("where burden is a task-level latent variable.\n")
+```
+
+# Model 7: Hierarchical Factor Model
+
+## Model Structure
+
+Model 7 restructures the latent variables to better use exposure and resources for identification:
+
+**Latent structure:**
+
+-   $\mu_j \sim \text{Normal}(0, \sigma_\mu)$ — developer mean (where developer j typically sits)
+-   $\delta_n \sim \text{Normal}(0, \sigma_\delta)$ — task deviation (how much harder/easier than typical for this developer)
+-   $\eta_n = \mu_j + \delta_n$ — total latent variable
+
+**Outcomes:**
+
+-   `forecast ~ NegBinomial2(exp(alpha_f + eta), phi)` — loads on eta (coef = 1 for identification)
+-   `exposure ~ OrderedLogistic(-lambda_e * delta, cuts_e)` — loads on delta (negative: high delta = hard task = low exposure)
+-   `resources ~ OrderedLogistic(lambda_r * delta, cuts_r)` — loads on delta (positive: high delta = hard task = high resources)
+-   `y ~ Lognormal(alpha_t + beta_eta * eta + beta_trt * ai + beta_eta_trt * eta * ai, sigma_t)` — loads on eta with heterogeneous treatment
+
+**Identification:**
+
+-   Forecast identifies eta = mu + delta (coefficient fixed to 1)
+-   Exposure and resources identify delta (task-level component)
+-   Together: we can separate mu from delta
+
+**Key difference from Model 6:** Exposure and resources now load on delta (task deviation) rather than on comfort or gap. This means they inform "how unusual is this task for this developer" rather than developer-level properties.
+
+## Priors
+
+| Parameter    | Prior                 | Interpretation                 |
+|--------------|-----------------------|--------------------------------|
+| sigma_mu     | HalfNormal(0, 0.78)   | Developer mean spread          |
+| sigma_delta  | HalfNormal(0, 0.39)   | Task deviation spread          |
+| sigma_t      | HalfNormal(0, 0.25)   | Completion time noise          |
+| kappa        | HalfNormal(0, 0.10)   | Forecast overdispersion        |
+| alpha_f      | Normal(log(17), 0.30) | Log expected forecast baseline |
+| alpha_t      | Normal(log(90), 0.40) | Log median completion baseline |
+| beta_eta     | Normal(1, 0.3)        | eta -\> completion             |
+| beta_trt     | Normal(0, 0.7)        | Treatment effect at eta = 0    |
+| beta_eta_trt | Normal(0, 0.15)       | eta x treatment interaction    |
+| lambda_e     | Normal(1, 0.43)       | delta -\> exposure             |
+| lambda_r     | Normal(1, 0.43)       | delta -\> resources            |
+
+## Prior Predictive Checks
+
+```{r}
+#| label: m7-prior-data
+
+stan_data_m7_prior <- list(
+  N = stan_data_m6$N,
+  J = stan_data_m6$J,
+  dev_idx = stan_data_m6$dev_idx,
+  ai_access = stan_data_m6$ai_access,
+
+  # Dirichlet hyperparameters for exposure (K=5)
+  rho_e = rep(1/5, 5),
+  tau_e = 0.1,
+
+  # Dirichlet hyperparameters for resources (K=3)
+  rho_r = rep(1/3, 3),
+  tau_r = 0.2
+)
+```
+
+```{r}
+#| label: m7-prior-fit
+
+fit_prior_m7 <- stan(
+  file = "stan_programs/model7_prior.stan",
+  data = stan_data_m7_prior,
+  algorithm = "Fixed_param",
+  iter = 1000,
+  chains = 1,
+  seed = 1234
+)
+
+samples_prior_m7 <- util$extract_expectand_vals(fit_prior_m7)
+```
+
+### Prior on sigma_mu (developer mean spread)
+
+```{r}
+#| label: fig-m7-prior-sigma-mu
+#| fig-cap: "Model 7 prior: sigma_mu (developer mean spread)"
+
+util$plot_line_hist(samples_prior_m7$sigma_mu, 0, 2.5, 0.05,
+                    xlab = "sigma_mu")
+```
+
+### Prior on sigma_delta (task deviation spread)
+
+```{r}
+#| label: fig-m7-prior-sigma-delta
+#| fig-cap: "Model 7 prior: sigma_delta (task deviation spread)"
+
+util$plot_line_hist(samples_prior_m7$sigma_delta, 0, 1.5, 0.05,
+                    xlab = "sigma_delta")
+```
+
+### Prior on lambda_e (delta -\> exposure)
+
+```{r}
+#| label: fig-m7-prior-lambda-e
+#| fig-cap: "Model 7 prior: lambda_e (delta effect on exposure)"
+
+util$plot_line_hist(samples_prior_m7$lambda_e, 0, 3, 0.1,
+                    xlab = "lambda_e")
+```
+
+### Prior on lambda_r (delta -\> resources)
+
+```{r}
+#| label: fig-m7-prior-lambda-r
+#| fig-cap: "Model 7 prior: lambda_r (delta effect on resources)"
+
+util$plot_line_hist(samples_prior_m7$lambda_r, 0, 3, 0.1,
+                    xlab = "lambda_r")
+```
+
+### Prior on beta_eta (eta -\> completion)
+
+```{r}
+#| label: fig-m7-prior-beta-eta
+#| fig-cap: "Model 7 prior: beta_eta (eta effect on completion)"
+
+util$plot_line_hist(samples_prior_m7$beta_eta, 0, 2.5, 0.05,
+                    xlab = "beta_eta")
+```
+
+### Prior on beta_eta_trt (eta x treatment interaction)
+
+```{r}
+#| label: fig-m7-prior-beta-eta-trt
+#| fig-cap: "Model 7 prior: beta_eta_trt (heterogeneous treatment effect)"
+
+util$plot_line_hist(samples_prior_m7$beta_eta_trt, -0.6, 0.6, 0.025,
+                    xlab = "beta_eta_trt")
+abline(v = 0, lty = 2, lwd = 2)
+```
+
+### Prior predictive: simulated eta distribution
+
+```{r}
+#| label: fig-m7-prior-eta
+#| fig-cap: "Model 7 prior predictive: eta distribution"
+
+util$plot_hist_quantiles(samples_prior_m7, 'eta', -4, 4, 0.25,
+                         xlab = "eta")
+```
+
+### Prior predictive: simulated delta distribution
+
+```{r}
+#| label: fig-m7-prior-delta
+#| fig-cap: "Model 7 prior predictive: delta distribution"
+
+util$plot_hist_quantiles(samples_prior_m7, 'delta', -3, 3, 0.2,
+                         xlab = "delta")
+```
+
+### Prior predictive: simulated exposure distribution
+
+```{r}
+#| label: fig-m7-prior-exposure
+#| fig-cap: "Model 7 prior predictive: exposure distribution"
+
+util$plot_hist_quantiles(samples_prior_m7, 'exposure_sim', 0.5, 5.5, 1,
+                         xlab = "Exposure (1-5)")
+```
+
+### Prior predictive: simulated resources distribution
+
+```{r}
+#| label: fig-m7-prior-resources
+#| fig-cap: "Model 7 prior predictive: resources distribution"
+
+util$plot_hist_quantiles(samples_prior_m7, 'resources_sim', 0.5, 3.5, 1,
+                         xlab = "Resources (1-3)")
+```
+
+### Prior predictive: simulated completion time
+
+```{r}
+#| label: fig-m7-prior-y
+#| fig-cap: "Model 7 prior predictive: completion time distribution"
+
+util$plot_hist_quantiles(samples_prior_m7, 'y_sim', 0, 800, 25,
+                         xlab = "Completion time (minutes)")
+```
+
+### Prior predictive: treatment effect
+
+```{r}
+#| label: fig-m7-prior-pct-lift
+#| fig-cap: "Model 7 prior: treatment effect at eta = 0"
+
+util$plot_line_hist(samples_prior_m7$pct_lift, -100, 100, 5,
+                    xlab = "% change in completion time")
+abline(v = 0, lty = 2, lwd = 2)
+```
+
+### Prior predictive summary
+
+```{r}
+#| label: m7-prior-summary
+
+cat("Prior predictive summary (Model 7):\n\n")
+
+cat("sigma_mu (developer mean spread):\n")
+print(util$my_q(samples_prior_m7$sigma_mu))
+
+cat("\nsigma_delta (task deviation spread):\n")
+print(util$my_q(samples_prior_m7$sigma_delta))
+
+cat("\nlambda_e (delta -> exposure):\n")
+print(util$my_q(samples_prior_m7$lambda_e))
+
+cat("\nlambda_r (delta -> resources):\n")
+print(util$my_q(samples_prior_m7$lambda_r))
+
+cat("\nbeta_eta (eta -> completion):\n")
+print(util$my_q(samples_prior_m7$beta_eta))
+
+cat("\nbeta_eta_trt (eta x treatment):\n")
+print(util$my_q(samples_prior_m7$beta_eta_trt))
+
+cat("\npct_lift (treatment effect at eta=0):\n")
+print(util$my_q(samples_prior_m7$pct_lift))
+
+cat("\nMean eta by draw:\n")
+print(util$my_q(samples_prior_m7$mean_eta))
+
+cat("\nSD eta by draw:\n")
+print(util$my_q(samples_prior_m7$sd_eta))
+
+cat("\nMean exposure by draw:\n")
+print(util$my_q(samples_prior_m7$mean_exposure))
+
+cat("\nMean resources by draw:\n")
+print(util$my_q(samples_prior_m7$mean_resources))
+```
+
+## Fit Model 7
+
+```{r}
+#| label: m7-data
+
+stan_data_m7 <- list(
+  N = stan_data_m6$N,
+  J = stan_data_m6$J,
+  dev_idx = stan_data_m6$dev_idx,
+  y = stan_data_m6$y,
+  forecast = stan_data_m6$forecast,
+  ai_access = stan_data_m6$ai_access,
+
+  N_obs_exposure = stan_data_m6$N_obs_exposure,
+  exposure_idx = stan_data_m6$exposure_idx,
+  exposure = stan_data_m6$exposure,
+
+  N_obs_resources = stan_data_m6$N_obs_resources,
+  resources_idx = stan_data_m6$resources_idx,
+  resources = stan_data_m6$resources,
+
+  # Dirichlet hyperparameters
+  rho_e = rep(1/5, 5),
+  tau_e = 0.1,
+  rho_r = rep(1/3, 3),
+  tau_r = 0.2
+)
+```
+
+```{r}
+#| label: m7-fit
+
+fit_m7 <- stan(
+  file = "stan_programs/model7.stan",
+  data = stan_data_m7,
+  iter = 2000,
+  warmup = 1000,
+  chains = 4,
+  seed = 1234,
+  control = list(adapt_delta = 0.8)
+)
+
+samples_m7 <- util$extract_expectand_vals(fit_m7)
+diagnostics_m7 <- util$extract_hmc_diagnostics(fit_m7)
+```
+
+## Diagnostics
+
+```{r}
+#| label: m7-diagnostics
+
+util$check_all_hmc_diagnostics(diagnostics_m7)
+
+# Exclude integer prediction arrays from expectand diagnostics
+# (tail_hat doesn't work well with discrete values)
+exclude_patterns <- c("exposure_pred", "resources_pred", "forecast_shifted_pred")
+samples_m7_continuous <- samples_m7[!grepl(paste(exclude_patterns, collapse = "|"), names(samples_m7))]
+util$check_all_expectand_diagnostics(samples_m7_continuous)
+```
+
+## Posterior Retrodictive Checks
+
+### Completion time
+
+```{r}
+#| label: fig-m7-retro-y
+#| fig-cap: "Model 7 posterior retrodictive: completion time"
+
+util$plot_hist_quantiles(samples_m7, 'y_pred', 0, 800, 25,
+                         baseline_values = stan_data_m7$y,
+                         xlab = "Completion time (minutes)")
+```
+
+```{r}
+#| label: fig-m7-retro-log-y
+#| fig-cap: "Model 7 posterior retrodictive: log completion time"
+
+util$plot_hist_quantiles(samples_m7, 'log_y_pred', 2, 8, 0.25,
+                         baseline_values = log(stan_data_m7$y),
+                         xlab = "Log completion time")
+```
+
+### Forecast
+
+```{r}
+#| label: fig-m7-retro-forecast
+#| fig-cap: "Model 7 posterior retrodictive: forecast"
+
+util$plot_hist_quantiles(samples_m7, 'forecast_pred', 0, 400, 25,
+                         baseline_values = stan_data_m7$forecast,
+                         xlab = "Forecast (minutes)")
+```
+
+### Exposure
+
+```{r}
+#| label: fig-m7-retro-exposure
+#| fig-cap: "Model 7 posterior retrodictive: exposure distribution (observed cases)"
+
+exposure_pred_obs_m7 <- samples_m7[paste0('exposure_pred[', stan_data_m7$exposure_idx, ']')]
+names(exposure_pred_obs_m7) <- paste0('exposure_pred_obs[', seq_along(stan_data_m7$exposure_idx), ']')
+
+util$plot_hist_quantiles(exposure_pred_obs_m7, 'exposure_pred_obs', 0.5, 5.5, 1,
+                         baseline_values = stan_data_m7$exposure,
+                         xlab = "Exposure (1-5)")
+```
+
+### Resources
+
+```{r}
+#| label: fig-m7-retro-resources
+#| fig-cap: "Model 7 posterior retrodictive: resources distribution (observed cases)"
+
+resources_pred_obs_m7 <- samples_m7[paste0('resources_pred[', stan_data_m7$resources_idx, ']')]
+names(resources_pred_obs_m7) <- paste0('resources_pred_obs[', seq_along(stan_data_m7$resources_idx), ']')
+
+util$plot_hist_quantiles(resources_pred_obs_m7, 'resources_pred_obs', 0.5, 3.5, 1,
+                         baseline_values = stan_data_m7$resources,
+                         xlab = "Resources (1-3)")
+```
+
+## Parameter Posteriors
+
+### Treatment effect at eta = 0
+
+```{r}
+#| label: fig-m7-pct-lift
+#| fig-cap: "Model 7: treatment effect at eta = 0"
+
+util$plot_line_hist(samples_m7$pct_lift, -60, 60, 2.5,
+                    xlab = "% change in completion time")
+abline(v = 0, lty = 2, lwd = 2)
+
+cat("Treatment effect at eta = 0:\n")
+print(util$my_q(samples_m7$pct_lift))
+```
+
+### Heterogeneous treatment effect (beta_eta_trt)
+
+```{r}
+#| label: fig-m7-beta-eta-trt
+#| fig-cap: "Model 7: beta_eta_trt (heterogeneous treatment effect)"
+
+util$plot_line_hist(samples_m7$beta_eta_trt, -0.5, 0.5, 0.025,
+                    xlab = "beta_eta_trt")
+abline(v = 0, lty = 2, lwd = 2)
+
+cat("beta_eta_trt:\n")
+print(util$my_q(samples_m7$beta_eta_trt))
+```
+
+### Treatment effect by eta level
+
+```{r}
+#| label: fig-m7-trt-by-eta
+#| fig-cap: "Model 7: treatment effect at different eta levels"
+
+par(mfrow = c(1, 1))
+
+util$plot_line_hist(samples_m7$pct_lift_low_eta, -80, 80, 4,
+                    xlab = "% lift")
+abline(v = 0, lty = 2, lwd = 2)
+title("Low eta (easy)", line = 1)
+
+util$plot_line_hist(samples_m7$pct_lift, -80, 80, 4,
+                    xlab = "% lift")
+abline(v = 0, lty = 2, lwd = 2)
+title("eta = 0 (average)", line = 1)
+
+util$plot_line_hist(samples_m7$pct_lift_high_eta, -80, 80, 4,
+                    xlab = "% lift")
+abline(v = 0, lty = 2, lwd = 2)
+title("High eta (hard)", line = 1)
+```
+
+### lambda_e (delta -\> exposure)
+
+```{r}
+#| label: fig-m7-lambda-e
+#| fig-cap: "Model 7: lambda_e posterior"
+
+util$plot_line_hist(samples_m7$lambda_e, 0, 3, 0.1,
+                    xlab = "lambda_e")
+
+cat("lambda_e (delta -> exposure):\n")
+print(util$my_q(samples_m7$lambda_e))
+```
+
+### lambda_r (delta -\> resources)
+
+```{r}
+#| label: fig-m7-lambda-r
+#| fig-cap: "Model 7: lambda_r posterior"
+
+util$plot_line_hist(samples_m7$lambda_r, -3, 3, 0.1,
+                    xlab = "lambda_r")
+
+cat("lambda_r (delta -> resources):\n")
+print(util$my_q(samples_m7$lambda_r))
+```
+
+### sigma_mu (developer mean spread)
+
+```{r}
+#| label: fig-m7-sigma-mu
+#| fig-cap: "Model 7: sigma_mu posterior"
+
+util$plot_line_hist(samples_m7$sigma_mu, 0, 1.5, 0.05,
+                    xlab = "sigma_mu")
+
+cat("sigma_mu:\n")
+print(util$my_q(samples_m7$sigma_mu))
+```
+
+### sigma_delta (task deviation spread)
+
+```{r}
+#| label: fig-m7-sigma-delta
+#| fig-cap: "Model 7: sigma_delta posterior"
+
+util$plot_line_hist(samples_m7$sigma_delta, 0, 1, 0.025,
+                    xlab = "sigma_delta")
+
+cat("sigma_delta:\n")
+print(util$my_q(samples_m7$sigma_delta))
+```
+
+### beta_eta (eta -\> completion)
+
+```{r}
+#| label: fig-m7-beta-eta
+#| fig-cap: "Model 7: beta_eta posterior"
+
+util$plot_line_hist(samples_m7$beta_eta, 0, 2, 0.05,
+                    xlab = "beta_eta")
+
+cat("beta_eta:\n")
+print(util$my_q(samples_m7$beta_eta))
+```
+
+## Prior vs Posterior Comparisons
+
+```{r}
+#| label: fig-m7-prior-post-sigma-mu
+#| fig-cap: "Model 7: Prior (teal) vs Posterior for sigma_mu"
+
+util$plot_expectand_pushforward(samples_m7[["sigma_mu"]], 25,
+                                display_name = "sigma_mu", flim = c(0, 1.5))
+xs <- seq(0, 1.5, 0.01)
+lines(xs, 2 * dnorm(xs, 0, 0.78), lwd = 2, col = c_light_teal)
+```
+
+```{r}
+#| label: fig-m7-prior-post-sigma-delta
+#| fig-cap: "Model 7: Prior (teal) vs Posterior for sigma_delta"
+
+util$plot_expectand_pushforward(samples_m7[["sigma_delta"]], 25,
+                                display_name = "sigma_delta", flim = c(0, 1))
+xs <- seq(0, 1, 0.01)
+lines(xs, 2 * dnorm(xs, 0, 0.39), lwd = 2, col = c_light_teal)
+```
+
+```{r}
+#| label: fig-m7-prior-post-sigma-t
+#| fig-cap: "Model 7: Prior (teal) vs Posterior for sigma_t"
+
+util$plot_expectand_pushforward(samples_m7[["sigma_t"]], 25,
+                                display_name = "sigma_t", flim = c(0, 0.8))
+xs <- seq(0, 0.8, 0.01)
+lines(xs, 2 * dnorm(xs, 0, 0.25), lwd = 2, col = c_light_teal)
+```
+
+```{r}
+#| label: fig-m7-prior-post-kappa
+#| fig-cap: "Model 7: Prior (teal) vs Posterior for kappa"
+
+util$plot_expectand_pushforward(samples_m7[["kappa"]], 25,
+                                display_name = "kappa", flim = c(0, 0.5))
+xs <- seq(0, 0.5, 0.005)
+lines(xs, 2 * dnorm(xs, 0, 0.10), lwd = 2, col = c_light_teal)
+```
+
+```{r}
+#| label: fig-m7-prior-post-alpha-f
+#| fig-cap: "Model 7: Prior (teal) vs Posterior for alpha_f"
+
+util$plot_expectand_pushforward(samples_m7[["alpha_f"]], 25,
+                                display_name = "alpha_f", flim = c(1.5, 4.5))
+xs <- seq(1.5, 4.5, 0.01)
+lines(xs, dnorm(xs, log(17), 0.30), lwd = 2, col = c_light_teal)
+```
+
+```{r}
+#| label: fig-m7-prior-post-alpha-t
+#| fig-cap: "Model 7: Prior (teal) vs Posterior for alpha_t"
+
+util$plot_expectand_pushforward(samples_m7[["alpha_t"]], 25,
+                                display_name = "alpha_t", flim = c(3.5, 5.5))
+xs <- seq(3.5, 5.5, 0.01)
+lines(xs, dnorm(xs, log(90), 0.40), lwd = 2, col = c_light_teal)
+```
+
+```{r}
+#| label: fig-m7-prior-post-beta-eta
+#| fig-cap: "Model 7: Prior (teal) vs Posterior for beta_eta"
+
+util$plot_expectand_pushforward(samples_m7[["beta_eta"]], 25,
+                                display_name = "beta_eta", flim = c(0, 2.5))
+xs <- seq(0, 2.5, 0.01)
+lines(xs, dnorm(xs, 1, 0.3), lwd = 2, col = c_light_teal)
+```
+
+```{r}
+#| label: fig-m7-prior-post-beta-trt
+#| fig-cap: "Model 7: Prior (teal) vs Posterior for beta_trt"
+
+util$plot_expectand_pushforward(samples_m7[["beta_trt"]], 25,
+                                display_name = "beta_trt", flim = c(-2, 2))
+xs <- seq(-2, 2, 0.01)
+lines(xs, dnorm(xs, 0, 0.7), lwd = 2, col = c_light_teal)
+```
+
+```{r}
+#| label: fig-m7-prior-post-beta-eta-trt
+#| fig-cap: "Model 7: Prior (teal) vs Posterior for beta_eta_trt"
+
+util$plot_expectand_pushforward(samples_m7[["beta_eta_trt"]], 25,
+                                display_name = "beta_eta_trt", flim = c(-0.5, 0.5))
+xs <- seq(-0.5, 0.5, 0.01)
+lines(xs, dnorm(xs, 0, 0.15), lwd = 2, col = c_light_teal)
+abline(v = 0, lty = 2)
+```
+
+```{r}
+#| label: fig-m7-prior-post-lambda-e
+#| fig-cap: "Model 7: Prior (teal) vs Posterior for lambda_e"
+
+util$plot_expectand_pushforward(samples_m7[["lambda_e"]], 25,
+                                display_name = "lambda_e", flim = c(-1, 3))
+xs <- seq(-1, 3, 0.01)
+lines(xs, dnorm(xs, 1, 0.43), lwd = 2, col = c_light_teal)
+```
+
+```{r}
+#| label: fig-m7-prior-post-lambda-r
+#| fig-cap: "Model 7: Prior (teal) vs Posterior for lambda_r"
+
+util$plot_expectand_pushforward(samples_m7[["lambda_r"]], 25,
+                                display_name = "lambda_r", flim = c(-1, 3))
+xs <- seq(-1, 3, 0.01)
+lines(xs, dnorm(xs, 1, 0.43), lwd = 2, col = c_light_teal)
+```
+
+```{r}
+#| label: fig-m7-prior-post-latent
+#| fig-cap: "Model 7: Prior (teal) vs Posterior for example latent variables"
+
+par(mfrow = c(1, 2))
+
+# mu[1] - example developer mean
+util$plot_expectand_pushforward(samples_m7[["mu[1]"]], 25,
+                                display_name = "mu[1]", flim = c(-2, 2))
+xs <- seq(-2, 2, 0.01)
+lines(xs, dnorm(xs, 0, 0.78), lwd = 2, col = c_light_teal)
+
+# delta[1] - example task deviation
+util$plot_expectand_pushforward(samples_m7[["delta[1]"]], 25,
+                                display_name = "delta[1]", flim = c(-1.5, 1.5))
+xs <- seq(-1.5, 1.5, 0.01)
+lines(xs, dnorm(xs, 0, 0.39), lwd = 2, col = c_light_teal)
+```
+
+### Posterior summaries for all eta values
+
+```{r}
+#| label: fig-m7-eta-summary
+#| fig-cap: "Model 7: Posterior mean and 80% intervals for all eta values"
+#| fig-height: 6
+
+# Extract eta samples
+eta_names <- paste0("eta[", 1:stan_data_m7$N, "]")
+eta_samples <- samples_m7[eta_names]
+
+# Compute posterior summaries
+eta_mean <- sapply(eta_samples, mean)
+eta_q10 <- sapply(eta_samples, quantile, probs = 0.10)
+eta_q90 <- sapply(eta_samples, quantile, probs = 0.90)
+
+# Sort by posterior mean for visualization
+ord <- order(eta_mean)
+
+# Plot
+plot(1:stan_data_m7$N, eta_mean[ord], pch = 19, cex = 0.5,
+     xlab = "Observation (sorted by posterior mean)",
+     ylab = "eta",
+     ylim = range(c(eta_q10, eta_q90)),
+     main = "Posterior eta: mean and 80% intervals")
+segments(1:stan_data_m7$N, eta_q10[ord], 1:stan_data_m7$N, eta_q90[ord],
+         col = rgb(0, 0, 0, 0.3))
+abline(h = 0, lty = 2, col = "red")
+
+cat("eta posterior summary:\n")
+cat("  Mean of means:", round(mean(eta_mean), 3), "\n")
+cat("  SD of means:", round(sd(eta_mean), 3), "\n")
+cat("  Range of means:", round(range(eta_mean), 3), "\n")
+```
+
+```{r}
+#| label: fig-m7-mu-summary
+#| fig-cap: "Model 7: Posterior mean and 80% intervals for developer-level mu"
+#| fig-height: 6
+
+# Extract mu samples
+mu_names <- paste0("mu[", 1:stan_data_m7$J, "]")
+mu_samples <- samples_m7[mu_names]
+
+# Compute posterior summaries
+mu_mean <- sapply(mu_samples, mean)
+mu_q10 <- sapply(mu_samples, quantile, probs = 0.10)
+mu_q90 <- sapply(mu_samples, quantile, probs = 0.90)
+
+# Sort by posterior mean for visualization
+ord_dev <- order(mu_mean)
+
+# Plot
+plot(1:stan_data_m7$J, mu_mean[ord_dev], pch = 19, cex = 0.8,
+     xlab = "Developer (sorted by posterior mean)",
+     ylab = "mu",
+     ylim = range(c(mu_q10, mu_q90)),
+     main = "Posterior mu: mean and 80% intervals")
+segments(1:stan_data_m7$J, mu_q10[ord_dev], 1:stan_data_m7$J, mu_q90[ord_dev],
+         col = rgb(0, 0, 0, 0.5), lwd = 2)
+abline(h = 0, lty = 2, col = "red")
+
+cat("mu posterior summary:\n")
+cat("  Mean of means:", round(mean(mu_mean), 3), "\n")
+cat("  SD of means:", round(sd(mu_mean), 3), "\n")
+cat("  Range of means:", round(range(mu_mean), 3), "\n")
+```
+
+## Compare Models 6 and 7
+
+```{r}
+#| label: fig-m6-m7-compare-trt
+#| fig-cap: "Treatment effect comparison: Model 6 vs Model 7 (at eta/gap = 0)"
+
+util$plot_line_hist(samples_m6$pct_lift, -60, 60, 2.5,
+                    xlab = "% change in completion time",
+                    col = "purple")
+util$plot_line_hist(samples_m7$pct_lift, -60, 60, 2.5,
+                    col = "darkgreen", add = TRUE)
+abline(v = 0, lty = 2, lwd = 2)
+legend("topright", c("Model 6", "Model 7"),
+       fill = c("purple", "darkgreen"))
+```
+
+```{r}
+#| label: fig-m6-m7-compare-log-y
+#| fig-cap: "Log completion time posterior predictive: Model 6 (top) vs Model 7 (bottom)"
+#| fig-height: 8
+
+par(mfrow = c(2, 1))
+
+util$plot_hist_quantiles(samples_m6, 'log_y_pred', 2, 8, 0.25,
+                         baseline_values = log(stan_data_m6$y),
+                         xlab = "log(completion time)")
+title("Model 6", line = 1)
+
+util$plot_hist_quantiles(samples_m7, 'log_y_pred', 2, 8, 0.25,
+                         baseline_values = log(stan_data_m7$y),
+                         xlab = "log(completion time)")
+title("Model 7", line = 1)
+```
+
+## Model 7 Summary
+
+```{r}
+#| label: m7-summary
+
+cat("=== MODEL 7 POSTERIOR SUMMARY ===\n\n")
+
+cat("LATENT STRUCTURE:\n")
+cat("  sigma_mu (developer mean spread):\n")
+print(util$my_q(samples_m7$sigma_mu))
+cat("  sigma_delta (task deviation spread):\n")
+print(util$my_q(samples_m7$sigma_delta))
+
+cat("\nORDINAL LOADINGS:\n")
+cat("  lambda_e (delta -> exposure, negative in model):\n")
+print(util$my_q(samples_m7$lambda_e))
+cat("  lambda_r (delta -> resources, positive in model):\n")
+print(util$my_q(samples_m7$lambda_r))
+
+cat("\nCOMPLETION TIME MODEL:\n")
+cat("  beta_eta (eta -> log completion):\n")
+print(util$my_q(samples_m7$beta_eta))
+cat("  beta_trt (treatment at eta=0):\n")
+print(util$my_q(samples_m7$beta_trt))
+cat("  beta_eta_trt (eta x treatment):\n")
+print(util$my_q(samples_m7$beta_eta_trt))
+
+cat("\nTREATMENT EFFECTS:\n")
+cat("  At eta = -1 (easy):\n")
+print(util$my_q(samples_m7$pct_lift_low_eta))
+cat("  At eta = 0 (average):\n")
+print(util$my_q(samples_m7$pct_lift))
+cat("  At eta = +1 (hard):\n")
+print(util$my_q(samples_m7$pct_lift_high_eta))
 ```
